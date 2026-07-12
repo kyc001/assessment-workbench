@@ -81,9 +81,9 @@ uv run assessment-workbench --help
 ## M1.1 生命周期
 
 - [x] 定义 `QUEUED/RUNNING/WAITING_HUMAN/SUCCEEDED/FAILED/CANCELLED/INTERRUPTED`。
-- [ ] 增加 `CANCELLING`，并定义取消请求和最终取消的区别。
+- [x] 增加 `CANCELLING`，并定义取消请求和最终取消的区别。
 - [x] 运行状态和当前阶段持久化到 SQLite。
-- [ ] 定义合法状态转换矩阵，拒绝非法跳转。
+- [x] 定义合法状态转换矩阵，拒绝非法跳转。
 - [ ] 记录工作流输入摘要、配置快照和代码版本。
 
 ## M1.2 阶段事件
@@ -719,7 +719,7 @@ M11 CLI 和 M12 评测/安全贯穿 M1-M10
 
 - [x] M1-A：扩展 PhaseEvent 的 workflow、parent run/event、input/output artifact 字段。
 - [x] M1-B：建立 Artifact 表、原子写入和完整性校验。
-- [ ] M1-C：实现状态转换矩阵和 `CANCELLING`。
+- [x] M1-C：实现状态转换矩阵和 `CANCELLING`。
 - [ ] M1-D：实现检查点和 `runs resume`。
 - [ ] M1-E：实现 `HumanDecision` 与 `runs approve/reject/retry`。
 - [ ] M1-F：实现进程启动时的 interrupted run 恢复策略。

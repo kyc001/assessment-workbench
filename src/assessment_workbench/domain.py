@@ -184,10 +184,40 @@ class RunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING_HUMAN = "waiting_human"
+    CANCELLING = "cancelling"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+
+
+ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
+    RunStatus.QUEUED: frozenset({RunStatus.RUNNING, RunStatus.CANCELLED}),
+    RunStatus.RUNNING: frozenset(
+        {
+            RunStatus.WAITING_HUMAN,
+            RunStatus.CANCELLING,
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.INTERRUPTED,
+        }
+    ),
+    RunStatus.WAITING_HUMAN: frozenset(
+        {RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED, RunStatus.FAILED}
+    ),
+    RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.FAILED}),
+    RunStatus.INTERRUPTED: frozenset(
+        {RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED, RunStatus.FAILED}
+    ),
+    RunStatus.SUCCEEDED: frozenset(),
+    RunStatus.FAILED: frozenset(),
+    RunStatus.CANCELLED: frozenset(),
+}
+
+
+def validate_run_transition(current: RunStatus, target: RunStatus) -> None:
+    if target not in ALLOWED_RUN_TRANSITIONS[current]:
+        raise ValueError(f"invalid run status transition: {current} -> {target}")
 
 
 class PhaseStatus(StrEnum):

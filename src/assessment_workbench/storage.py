@@ -17,8 +17,10 @@ from assessment_workbench.domain import (
     ParsedDocument,
     PhaseEvent,
     RetrievalHit,
+    RunStatus,
     WorkflowRun,
     now_utc,
+    validate_run_transition,
 )
 
 
@@ -66,6 +68,30 @@ class RunStore:
                 """UPDATE runs SET status=?, current_phase=?, updated_at=?, error=? WHERE id=?""",
                 (run.status, run.current_phase, run.updated_at.isoformat(), run.error, str(run.id)),
             )
+
+    def transition(
+        self,
+        run: WorkflowRun,
+        target: RunStatus,
+        *,
+        current_phase: str | None = None,
+        error: str | None = None,
+    ) -> WorkflowRun:
+        validate_run_transition(run.status, target)
+        run.status = target
+        if current_phase is not None:
+            run.current_phase = current_phase
+        run.error = error
+        self.save(run)
+        return run
+
+    def request_cancel(self, run_id: UUID) -> WorkflowRun:
+        run = self.get(run_id)
+        if run is None:
+            raise KeyError(f"run not found: {run_id}")
+        if run.status is RunStatus.QUEUED:
+            return self.transition(run, RunStatus.CANCELLED)
+        return self.transition(run, RunStatus.CANCELLING)
 
     def append_event(self, event: PhaseEvent) -> None:
         with self.workspace.connect() as connection:

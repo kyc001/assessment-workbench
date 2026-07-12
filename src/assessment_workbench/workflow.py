@@ -30,8 +30,7 @@ class WorkflowEngine:
         run = self.store.create(workflow)
         state = dict(context or {})
         state["run_id"] = run.id
-        run.status = RunStatus.RUNNING
-        self.store.save(run)
+        self.store.transition(run, RunStatus.RUNNING)
 
         try:
             for phase, step in steps:
@@ -90,14 +89,10 @@ class WorkflowEngine:
                     )
                 )
         except Exception as exc:
-            run.status = RunStatus.FAILED
-            run.error = str(exc)
-            self.store.save(run)
+            self.store.transition(run, RunStatus.FAILED, error=str(exc))
             return run, state
 
-        run.status = RunStatus.SUCCEEDED
-        run.current_phase = "DONE"
-        self.store.save(run)
+        self.store.transition(run, RunStatus.SUCCEEDED, current_phase="DONE")
         return run, state
 
 

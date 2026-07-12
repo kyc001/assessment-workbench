@@ -53,3 +53,15 @@ async def test_workflow_records_parent_and_artifact_links(tmp_path: Path) -> Non
     assert events[0].parent_event_id == parent_event_id
     assert events[0].input_artifact_ids == [input_id]
     assert events[1].output_artifact_ids == [output_id]
+
+
+def test_cancel_request_uses_cancelling_state(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    queued = store.create("queued")
+    running = store.create("running")
+    store.transition(running, RunStatus.RUNNING)
+
+    assert store.request_cancel(queued.id).status is RunStatus.CANCELLED
+    assert store.request_cancel(running.id).status is RunStatus.CANCELLING
