@@ -164,6 +164,30 @@ async def test_human_rejection_fails_run(tmp_path: Path) -> None:
     assert resolved.error == "incorrect"
 
 
+async def test_cooperative_cancel_stops_before_next_step(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    engine = WorkflowEngine(store)
+    calls: list[str] = []
+
+    async def first(state: dict[str, Any]) -> dict[str, Any]:
+        calls.append("first")
+        store.request_cancel(state["run_id"])
+        return {"saved": "yes"}
+
+    async def second(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("second")
+        return {}
+
+    run, _ = await engine.execute("cancel", [("FIRST", first), ("SECOND", second)])
+
+    assert run.status is RunStatus.CANCELLED
+    assert calls == ["first"]
+    assert run.runner_host is None
+    assert store.get_checkpoint(run.id) is None
+
+
 def test_orphaned_local_runner_becomes_interrupted(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()

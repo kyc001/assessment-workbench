@@ -205,6 +205,21 @@ def inspect_run(
         typer.echo(request.model_dump_json(indent=2))
 
 
+@runs_app.command("cancel")
+def cancel_run(
+    run_id: UUID,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    store = RunStore(_workspace(workspace_path))
+    try:
+        run = store.request_cancel(run_id)
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Run: {run.id}")
+    typer.echo(f"Status: {run.status}")
+
+
 def _resolve_human(
     run_id: UUID,
     decision_type: HumanDecisionType,

@@ -81,6 +81,8 @@ class WorkflowEngine:
 
         try:
             for step_index, (phase, step) in enumerate(steps[start_index:], start=start_index):
+                if self._cancel_if_requested(run):
+                    return run, state
                 run.current_phase = phase
                 self.store.save(run)
                 occurrence_id = uuid4()
@@ -135,6 +137,8 @@ class WorkflowEngine:
                         completed_at=now_utc(),
                     )
                 )
+                if self._cancel_if_requested(run):
+                    return run, state
                 self.store.save_checkpoint(
                     WorkflowCheckpoint(
                         run_id=run.id,
@@ -168,6 +172,15 @@ class WorkflowEngine:
         self.store.release(run)
         self.store.clear_checkpoint(run.id)
         return run, state
+
+    def _cancel_if_requested(self, run: WorkflowRun) -> bool:
+        stored = self.store.get(run.id)
+        if stored is None or stored.status is not RunStatus.CANCELLING:
+            return False
+        run.status = stored.status
+        self.store.transition(run, RunStatus.CANCELLED)
+        self.store.release(run)
+        return True
 
 
 def _artifact_ids(value: object) -> list[UUID]:
