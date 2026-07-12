@@ -91,10 +91,10 @@ uv run assessment-workbench --help
 - [x] 成对记录 `running/completed/failed`。
 - [x] 支持 `round` 和 `occurrence_id`。
 - [x] 支持 `entity_type/entity_id` 字段。
-- [ ] 增加 `workflow` 字段，事件可脱离 run 单独解释。
-- [ ] 增加 `parent_event_id` 和 `parent_run_id`，支持题目子工作流。
-- [ ] 增加 `input_artifact_ids/output_artifact_ids`。
-- [ ] 增加结构化 `summary/warnings/error_code/error_details`。
+- [x] 增加 `workflow` 字段，事件可脱离 run 单独解释。
+- [x] 增加 `parent_event_id` 和 `parent_run_id`，支持题目子工作流。
+- [x] 增加 `input_artifact_ids/output_artifact_ids`。
+- [x] 增加结构化 `summary/warnings/error_code/error_details`。
 - [ ] 数据库约束同一 `occurrence_id` 只能有一个起始事件和一个终止事件。
 
 ## M1.3 Artifact 和版本
@@ -717,7 +717,7 @@ M11 CLI 和 M12 评测/安全贯穿 M1-M10
 
 当前下一批必须先补齐 M1，而不是直接继续堆 Agent：
 
-- [ ] M1-A：扩展 PhaseEvent 的 workflow、parent run/event、input/output artifact 字段。
+- [x] M1-A：扩展 PhaseEvent 的 workflow、parent run/event、input/output artifact 字段。
 - [ ] M1-B：建立 Artifact 表、原子写入和完整性校验。
 - [ ] M1-C：实现状态转换矩阵和 `CANCELLING`。
 - [ ] M1-D：实现检查点和 `runs resume`。

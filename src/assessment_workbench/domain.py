@@ -209,15 +209,23 @@ class WorkflowRun(BaseModel):
 class PhaseEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     run_id: UUID
+    workflow: str
     phase: str
     status: PhaseStatus
     occurrence_id: UUID
     round: int = Field(default=1, ge=1)
+    parent_run_id: UUID | None = None
+    parent_event_id: UUID | None = None
     entity_type: str | None = None
     entity_id: str | None = None
+    input_artifact_ids: list[UUID] = Field(default_factory=list)
+    output_artifact_ids: list[UUID] = Field(default_factory=list)
     started_at: datetime
     completed_at: datetime | None = None
     summary: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    error_code: str | None = None
+    error_details: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
     error: str | None = None
 
 

@@ -30,6 +30,7 @@ class Workspace:
         self.artifacts.mkdir(exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            _migrate_phase_events(connection)
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -66,19 +67,32 @@ class RunStore:
     def append_event(self, event: PhaseEvent) -> None:
         with self.workspace.connect() as connection:
             connection.execute(
-                "INSERT INTO phase_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO phase_events
+                (id, run_id, workflow, phase, status, occurrence_id, round,
+                 parent_run_id, parent_event_id, entity_type, entity_id,
+                 input_artifact_ids, output_artifact_ids, started_at, completed_at,
+                 summary, warnings, error_code, error_details, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(event.id),
                     str(event.run_id),
+                    event.workflow,
                     event.phase,
                     event.status,
                     str(event.occurrence_id),
                     event.round,
+                    str(event.parent_run_id) if event.parent_run_id else None,
+                    str(event.parent_event_id) if event.parent_event_id else None,
                     event.entity_type,
                     event.entity_id,
+                    json.dumps([str(value) for value in event.input_artifact_ids]),
+                    json.dumps([str(value) for value in event.output_artifact_ids]),
                     event.started_at.isoformat(),
                     event.completed_at.isoformat() if event.completed_at else None,
                     event.summary,
+                    json.dumps(event.warnings, ensure_ascii=False),
+                    event.error_code,
+                    json.dumps(event.error_details, ensure_ascii=False),
                     event.error,
                 ),
             )
@@ -99,7 +113,7 @@ class RunStore:
                 "SELECT * FROM phase_events WHERE run_id=? ORDER BY started_at, rowid",
                 (str(run_id),),
             ).fetchall()
-        return [PhaseEvent.model_validate(dict(row)) for row in rows]
+        return [_event_from_row(row) for row in rows]
 
 
 class LocalKnowledgeBackend:
@@ -260,6 +274,34 @@ def _run_from_row(row: sqlite3.Row) -> WorkflowRun:
     return WorkflowRun.model_validate(dict(row))
 
 
+def _event_from_row(row: sqlite3.Row) -> PhaseEvent:
+    payload = dict(row)
+    payload["input_artifact_ids"] = json.loads(payload.get("input_artifact_ids") or "[]")
+    payload["output_artifact_ids"] = json.loads(payload.get("output_artifact_ids") or "[]")
+    payload["warnings"] = json.loads(payload.get("warnings") or "[]")
+    payload["error_details"] = json.loads(payload.get("error_details") or "{}")
+    return PhaseEvent.model_validate(payload)
+
+
+def _migrate_phase_events(connection: sqlite3.Connection) -> None:
+    existing = {
+        row["name"] for row in connection.execute("PRAGMA table_info(phase_events)").fetchall()
+    }
+    columns = {
+        "workflow": "TEXT NOT NULL DEFAULT ''",
+        "parent_run_id": "TEXT",
+        "parent_event_id": "TEXT",
+        "input_artifact_ids": "TEXT NOT NULL DEFAULT '[]'",
+        "output_artifact_ids": "TEXT NOT NULL DEFAULT '[]'",
+        "warnings": "TEXT NOT NULL DEFAULT '[]'",
+        "error_code": "TEXT",
+        "error_details": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE phase_events ADD COLUMN {name} {definition}")
+
+
 def _merge_point(existing: KnowledgePoint, incoming: KnowledgePoint) -> KnowledgePoint:
     evidence = {f"{item.document_id}:{item.block_id}": item for item in existing.evidence}
     evidence.update({f"{item.document_id}:{item.block_id}": item for item in incoming.evidence})
@@ -295,15 +337,23 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS phase_events (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id),
+    workflow TEXT NOT NULL DEFAULT '',
     phase TEXT NOT NULL,
     status TEXT NOT NULL,
     occurrence_id TEXT NOT NULL,
     round INTEGER NOT NULL,
+    parent_run_id TEXT,
+    parent_event_id TEXT,
     entity_type TEXT,
     entity_id TEXT,
+    input_artifact_ids TEXT NOT NULL DEFAULT '[]',
+    output_artifact_ids TEXT NOT NULL DEFAULT '[]',
     started_at TEXT NOT NULL,
     completed_at TEXT,
     summary TEXT,
+    warnings TEXT NOT NULL DEFAULT '[]',
+    error_code TEXT,
+    error_details TEXT NOT NULL DEFAULT '{}',
     error TEXT
 );
 CREATE TABLE IF NOT EXISTS documents (

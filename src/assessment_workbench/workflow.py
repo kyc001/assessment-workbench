@@ -1,6 +1,6 @@
 from collections.abc import Awaitable, Callable
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from assessment_workbench.domain import (
     PhaseEvent,
@@ -23,6 +23,9 @@ class WorkflowEngine:
         workflow: str,
         steps: list[tuple[str, Step]],
         context: dict[str, Any] | None = None,
+        *,
+        parent_run_id: UUID | None = None,
+        parent_event_id: UUID | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         run = self.store.create(workflow)
         state = dict(context or {})
@@ -38,9 +41,13 @@ class WorkflowEngine:
                 self.store.append_event(
                     PhaseEvent(
                         run_id=run.id,
+                        workflow=workflow,
                         phase=phase,
                         status=PhaseStatus.RUNNING,
                         occurrence_id=occurrence_id,
+                        parent_run_id=parent_run_id,
+                        parent_event_id=parent_event_id,
+                        input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
                         started_at=started_at,
                     )
                 )
@@ -51,11 +58,17 @@ class WorkflowEngine:
                     self.store.append_event(
                         PhaseEvent(
                             run_id=run.id,
+                            workflow=workflow,
                             phase=phase,
                             status=PhaseStatus.FAILED,
                             occurrence_id=occurrence_id,
+                            parent_run_id=parent_run_id,
+                            parent_event_id=parent_event_id,
+                            input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
+                            output_artifact_ids=_artifact_ids(state.get("output_artifact_ids")),
                             started_at=started_at,
                             completed_at=now_utc(),
+                            error_code=type(exc).__name__,
                             error=str(exc),
                         )
                     )
@@ -63,9 +76,14 @@ class WorkflowEngine:
                 self.store.append_event(
                     PhaseEvent(
                         run_id=run.id,
+                        workflow=workflow,
                         phase=phase,
                         status=PhaseStatus.COMPLETED,
                         occurrence_id=occurrence_id,
+                        parent_run_id=parent_run_id,
+                        parent_event_id=parent_event_id,
+                        input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
+                        output_artifact_ids=_artifact_ids(state.get("output_artifact_ids")),
                         started_at=started_at,
                         completed_at=now_utc(),
                     )
@@ -80,3 +98,15 @@ class WorkflowEngine:
         run.current_phase = "DONE"
         self.store.save(run)
         return run, state
+
+
+def _artifact_ids(value: object) -> list[UUID]:
+    if not isinstance(value, list):
+        return []
+    result: list[UUID] = []
+    for item in value:
+        if isinstance(item, UUID):
+            result.append(item)
+        elif isinstance(item, str):
+            result.append(UUID(item))
+    return result
