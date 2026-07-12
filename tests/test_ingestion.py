@@ -36,4 +36,10 @@ async def test_ingestion_persists_graph_and_paired_events(tmp_path: Path) -> Non
         PhaseStatus.COMPLETED,
     ]
     assert events[0].occurrence_id == events[1].occurrence_id
-    assert (workspace.artifacts / str(run.id) / "knowledge-graph.json").exists()
+    artifacts = ArtifactStore(workspace).list(run.id)
+    assert [artifact.logical_name for artifact in artifacts] == [
+        "knowledge-graph.json",
+        "parsed-document.json",
+    ]
+    assert all(ArtifactStore(workspace).verify(artifact.id) for artifact in artifacts)
+    assert events[-1].output_artifact_ids

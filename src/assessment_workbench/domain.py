@@ -230,7 +230,13 @@ class PhaseEvent(BaseModel):
 
 
 class ArtifactRef(BaseModel):
-    name: str
+    id: UUID = Field(default_factory=uuid4)
+    run_id: UUID
+    logical_name: str
+    version: int = Field(ge=1)
     path: Path
     media_type: str
     sha256: str
+    size_bytes: int = Field(ge=0)
+    created_by_phase: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)

@@ -65,14 +65,20 @@ class QuestionSpecWorkflow:
                     "Provide rubric items whose scores sum to the question score",
                 ],
             )
-            return {"spec": spec}
+            artifact = self.artifacts.write_json(
+                state["run_id"],
+                "question-spec.json",
+                spec.model_dump(mode="json"),
+                created_by_phase="SPEC_PLANNING",
+            )
+            return {
+                "spec": spec,
+                "artifacts": [artifact],
+                "output_artifact_ids": [artifact.id],
+            }
 
         run, state = await self.engine.execute(
             "question_spec_planning",
             [("TOPIC_RESOLVING", resolve), ("SPEC_PLANNING", plan)],
         )
-        if run.status == "succeeded":
-            self.artifacts.write_json(
-                run.id, "question-spec.json", state["spec"].model_dump(mode="json")
-            )
         return run, state

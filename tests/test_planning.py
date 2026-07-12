@@ -36,4 +36,7 @@ async def test_plans_question_spec_from_topic(tmp_path: Path) -> None:
     assert spec.score == 20
     assert spec.difficulty.overall == 7
     assert spec.required_context
-    assert (workspace.artifacts / str(run.id) / "question-spec.json").exists()
+    artifacts_for_run = artifacts.list(run.id)
+    assert len(artifacts_for_run) == 1
+    assert artifacts_for_run[0].logical_name == "question-spec.json"
+    assert artifacts.verify(artifacts_for_run[0].id)

@@ -101,10 +101,10 @@ uv run assessment-workbench --help
 
 - [x] 按 run 保存 JSON 产物。
 - [x] 提供 SHA-256 计算能力。
-- [ ] 建立 artifact 数据表并保存 media type、大小、哈希、创建阶段和逻辑名称。
-- [ ] 产物写入采用临时文件加原子替换。
-- [ ] 同一逻辑对象使用不可变版本，不覆盖上一版。
-- [ ] 支持列出、读取和校验产物完整性。
+- [x] 建立 artifact 数据表并保存 media type、大小、哈希、创建阶段和逻辑名称。
+- [x] 产物写入采用临时文件加原子替换。
+- [x] 同一逻辑对象使用不可变版本，不覆盖上一版。
+- [x] 支持列出、读取和校验产物完整性。
 
 ## M1.4 检查点、恢复和取消
 
@@ -718,7 +718,7 @@ M11 CLI 和 M12 评测/安全贯穿 M1-M10
 当前下一批必须先补齐 M1，而不是直接继续堆 Agent：
 
 - [x] M1-A：扩展 PhaseEvent 的 workflow、parent run/event、input/output artifact 字段。
-- [ ] M1-B：建立 Artifact 表、原子写入和完整性校验。
+- [x] M1-B：建立 Artifact 表、原子写入和完整性校验。
 - [ ] M1-C：实现状态转换矩阵和 `CANCELLING`。
 - [ ] M1-D：实现检查点和 `runs resume`。
 - [ ] M1-E：实现 `HumanDecision` 与 `runs approve/reject/retry`。

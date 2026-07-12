@@ -29,6 +29,7 @@ class WorkflowEngine:
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         run = self.store.create(workflow)
         state = dict(context or {})
+        state["run_id"] = run.id
         run.status = RunStatus.RUNNING
         self.store.save(run)
 

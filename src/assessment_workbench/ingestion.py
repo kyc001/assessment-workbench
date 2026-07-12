@@ -64,7 +64,25 @@ class MaterialIngestionWorkflow:
             self.knowledge.save_document(course_id, document, kind.value)
             self.knowledge.upsert_points(points)
             self.knowledge.upsert_relations(relations)
-            return {}
+            document_artifact = self.artifacts.write_json(
+                state["run_id"],
+                "parsed-document.json",
+                document.model_dump(mode="json"),
+                created_by_phase="PERSISTING",
+            )
+            graph_artifact = self.artifacts.write_json(
+                state["run_id"],
+                "knowledge-graph.json",
+                {
+                    "points": [point.model_dump(mode="json") for point in points],
+                    "relations": [relation.model_dump(mode="json") for relation in relations],
+                },
+                created_by_phase="PERSISTING",
+            )
+            return {
+                "output_artifact_ids": [document_artifact.id, graph_artifact.id],
+                "artifacts": [document_artifact, graph_artifact],
+            }
 
         run, state = await self.engine.execute(
             "material_ingestion",
@@ -75,22 +93,6 @@ class MaterialIngestionWorkflow:
             ],
             {"course_id": course_id, "kind": kind.value},
         )
-        if run.status == "succeeded":
-            self.artifacts.write_json(
-                run.id,
-                "parsed-document.json",
-                state["document"].model_dump(mode="json"),
-            )
-            self.artifacts.write_json(
-                run.id,
-                "knowledge-graph.json",
-                {
-                    "points": [point.model_dump(mode="json") for point in state["points"]],
-                    "relations": [
-                        relation.model_dump(mode="json") for relation in state["relations"]
-                    ],
-                },
-            )
         return run, state
 
 

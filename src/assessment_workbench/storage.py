@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 from uuid import UUID
 
 from assessment_workbench.domain import (
+    ArtifactRef,
     KnowledgePoint,
     KnowledgeRelation,
     ModelCall,
@@ -241,13 +244,122 @@ class ArtifactStore:
     def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
-    def write_json(self, run_id: UUID, name: str, payload: object) -> Path:
+    def write_json(
+        self,
+        run_id: UUID,
+        logical_name: str,
+        payload: object,
+        *,
+        created_by_phase: str | None = None,
+    ) -> ArtifactRef:
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n"
+        return self.write_bytes(
+            run_id,
+            logical_name,
+            serialized.encode("utf-8"),
+            media_type="application/json",
+            created_by_phase=created_by_phase,
+        )
+
+    def write_bytes(
+        self,
+        run_id: UUID,
+        logical_name: str,
+        content: bytes,
+        *,
+        media_type: str,
+        created_by_phase: str | None = None,
+    ) -> ArtifactRef:
         run_dir = self.workspace.artifacts / str(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
-        destination = run_dir / name
-        serialized = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-        destination.write_text(serialized + "\n", encoding="utf-8")
-        return destination
+        version = self._next_version(run_id, logical_name)
+        destination = run_dir / _versioned_name(logical_name, version)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact-", dir=run_dir)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, destination)
+        except Exception:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+            raise
+        artifact = ArtifactRef(
+            run_id=run_id,
+            logical_name=logical_name,
+            version=version,
+            path=destination.relative_to(self.workspace.root),
+            media_type=media_type,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            created_by_phase=created_by_phase,
+        )
+        self._save(artifact)
+        return artifact
+
+    def list(self, run_id: UUID) -> list[ArtifactRef]:
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM artifacts WHERE run_id=? ORDER BY logical_name, version",
+                (str(run_id),),
+            ).fetchall()
+        return [ArtifactRef.model_validate_json(row["payload"]) for row in rows]
+
+    def get(self, artifact_id: UUID) -> ArtifactRef | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM artifacts WHERE id=?", (str(artifact_id),)
+            ).fetchone()
+        return ArtifactRef.model_validate_json(row["payload"]) if row else None
+
+    def read_bytes(self, artifact_id: UUID) -> bytes:
+        artifact = self.get(artifact_id)
+        if artifact is None:
+            raise KeyError(f"artifact not found: {artifact_id}")
+        path = self.workspace.root / artifact.path
+        content = path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != artifact.sha256:
+            raise ValueError(f"artifact integrity check failed: {artifact_id}")
+        return content
+
+    def verify(self, artifact_id: UUID) -> bool:
+        try:
+            self.read_bytes(artifact_id)
+        except (FileNotFoundError, KeyError, ValueError):
+            return False
+        return True
+
+    def _next_version(self, run_id: UUID, logical_name: str) -> int:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM artifacts "
+                "WHERE run_id=? AND logical_name=?",
+                (str(run_id), logical_name),
+            ).fetchone()
+        return int(row["version"]) + 1
+
+    def _save(self, artifact: ArtifactRef) -> None:
+        with self.workspace.connect() as connection:
+            connection.execute(
+                """INSERT INTO artifacts
+                (id, run_id, logical_name, version, path, media_type, sha256,
+                 size_bytes, created_by_phase, created_at, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(artifact.id),
+                    str(artifact.run_id),
+                    artifact.logical_name,
+                    artifact.version,
+                    str(artifact.path),
+                    artifact.media_type,
+                    artifact.sha256,
+                    artifact.size_bytes,
+                    artifact.created_by_phase,
+                    artifact.created_at.isoformat(),
+                    artifact.model_dump_json(),
+                ),
+            )
 
     @staticmethod
     def sha256(path: Path) -> str:
@@ -256,6 +368,13 @@ class ArtifactStore:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+
+def _versioned_name(logical_name: str, version: int) -> str:
+    path = Path(logical_name)
+    suffix = "".join(path.suffixes)
+    stem = path.name[: -len(suffix)] if suffix else path.name
+    return f"{stem}.v{version}{suffix}"
 
 
 def _run_values(run: WorkflowRun) -> tuple[str, str, str, str | None, str, str, str | None]:
@@ -389,5 +508,19 @@ CREATE TABLE IF NOT EXISTS model_calls (
     status TEXT NOT NULL,
     started_at TEXT NOT NULL,
     payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    logical_name TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    created_by_phase TEXT,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE(run_id, logical_name, version)
 );
 """
