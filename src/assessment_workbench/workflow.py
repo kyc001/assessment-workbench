@@ -3,6 +3,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from assessment_workbench.domain import (
+    HumanReviewRequest,
     PhaseEvent,
     PhaseStatus,
     RunStatus,
@@ -139,6 +140,18 @@ class WorkflowEngine:
                         context=_checkpoint_context(state),
                     )
                 )
+                human_review = state.pop("_human_review", None)
+                if isinstance(human_review, dict):
+                    request = HumanReviewRequest(
+                        run_id=run.id,
+                        phase=phase,
+                        prompt=str(human_review.get("prompt", "Review required")),
+                        artifact_ids=_artifact_ids(human_review.get("artifact_ids")),
+                    )
+                    self.store.create_human_review(request)
+                    self.store.transition(run, RunStatus.WAITING_HUMAN)
+                    state["human_review_request_id"] = str(request.id)
+                    return run, state
         except (KeyboardInterrupt, SystemExit):
             self.store.transition(run, RunStatus.INTERRUPTED)
             return run, state

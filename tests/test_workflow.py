@@ -2,7 +2,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from assessment_workbench.domain import PhaseStatus, RunStatus
+from assessment_workbench.domain import (
+    HumanDecision,
+    HumanDecisionType,
+    PhaseStatus,
+    RunStatus,
+)
 from assessment_workbench.storage import RunStore, Workspace
 from assessment_workbench.workflow import WorkflowEngine
 
@@ -101,3 +106,58 @@ async def test_resume_starts_after_last_checkpoint(tmp_path: Path) -> None:
     assert state["done"] is True
     assert calls == ["first", "interrupt", "second"]
     assert store.get_checkpoint(run.id) is None
+
+
+async def test_human_review_pauses_and_approval_makes_run_resumable(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    engine = WorkflowEngine(store)
+
+    async def request_review(_: dict[str, Any]) -> dict[str, Any]:
+        return {"_human_review": {"prompt": "Approve blueprint"}}
+
+    run, _ = await engine.execute("reviewable", [("REVIEW", request_review)])
+    assert run.status is RunStatus.WAITING_HUMAN
+    request = store.pending_human_review(run.id)
+    assert request is not None
+    assert request.prompt == "Approve blueprint"
+
+    resolved = store.resolve_human_review(
+        HumanDecision(
+            request_id=request.id,
+            run_id=run.id,
+            decision=HumanDecisionType.ACCEPT,
+            actor="tester",
+            reason="looks good",
+        )
+    )
+
+    assert resolved.status is RunStatus.INTERRUPTED
+    assert store.pending_human_review(run.id) is None
+
+
+async def test_human_rejection_fails_run(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    engine = WorkflowEngine(store)
+
+    async def request_review(_: dict[str, Any]) -> dict[str, Any]:
+        return {"_human_review": {"prompt": "Review"}}
+
+    run, _ = await engine.execute("reviewable", [("REVIEW", request_review)])
+    request = store.pending_human_review(run.id)
+    assert request is not None
+    resolved = store.resolve_human_review(
+        HumanDecision(
+            request_id=request.id,
+            run_id=run.id,
+            decision=HumanDecisionType.REJECT,
+            actor="tester",
+            reason="incorrect",
+        )
+    )
+
+    assert resolved.status is RunStatus.FAILED
+    assert resolved.error == "incorrect"

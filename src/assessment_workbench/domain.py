@@ -203,7 +203,13 @@ ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
         }
     ),
     RunStatus.WAITING_HUMAN: frozenset(
-        {RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED, RunStatus.FAILED}
+        {
+            RunStatus.RUNNING,
+            RunStatus.INTERRUPTED,
+            RunStatus.CANCELLING,
+            RunStatus.CANCELLED,
+            RunStatus.FAILED,
+        }
     ),
     RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.FAILED}),
     RunStatus.INTERRUPTED: frozenset(
@@ -241,6 +247,36 @@ class WorkflowCheckpoint(BaseModel):
     workflow: str
     next_step_index: int = Field(ge=0)
     context: dict[str, str | int | float | bool | None | list[str]]
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class HumanDecisionType(StrEnum):
+    ACCEPT = "accept"
+    REJECT = "reject"
+    EDIT_ACCEPT = "edit_accept"
+    RETRY = "retry"
+    ABORT = "abort"
+
+
+class HumanReviewRequest(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    run_id: UUID
+    phase: str
+    prompt: str
+    artifact_ids: list[UUID] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=now_utc)
+    resolved_at: datetime | None = None
+
+
+class HumanDecision(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    request_id: UUID
+    run_id: UUID
+    decision: HumanDecisionType
+    actor: str
+    reason: str = ""
+    input_artifact_ids: list[UUID] = Field(default_factory=list)
+    output_artifact_ids: list[UUID] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=now_utc)
 
 

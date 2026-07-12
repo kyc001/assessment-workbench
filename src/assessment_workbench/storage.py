@@ -11,6 +11,9 @@ from uuid import UUID
 
 from assessment_workbench.domain import (
     ArtifactRef,
+    HumanDecision,
+    HumanDecisionType,
+    HumanReviewRequest,
     KnowledgePoint,
     KnowledgeRelation,
     ModelCall,
@@ -119,6 +122,70 @@ class RunStore:
     def clear_checkpoint(self, run_id: UUID) -> None:
         with self.workspace.connect() as connection:
             connection.execute("DELETE FROM workflow_checkpoints WHERE run_id=?", (str(run_id),))
+
+    def create_human_review(self, request: HumanReviewRequest) -> None:
+        with self.workspace.connect() as connection:
+            connection.execute(
+                """INSERT INTO human_review_requests
+                (id, run_id, phase, created_at, resolved_at, payload)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    str(request.id),
+                    str(request.run_id),
+                    request.phase,
+                    request.created_at.isoformat(),
+                    None,
+                    request.model_dump_json(),
+                ),
+            )
+
+    def pending_human_review(self, run_id: UUID) -> HumanReviewRequest | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                """SELECT payload FROM human_review_requests
+                WHERE run_id=? AND resolved_at IS NULL ORDER BY created_at DESC LIMIT 1""",
+                (str(run_id),),
+            ).fetchone()
+        return HumanReviewRequest.model_validate_json(row["payload"]) if row else None
+
+    def resolve_human_review(self, decision: HumanDecision) -> WorkflowRun:
+        request = self.pending_human_review(decision.run_id)
+        if request is None or request.id != decision.request_id:
+            raise ValueError(f"no matching pending human review for run: {decision.run_id}")
+        run = self.get(decision.run_id)
+        if run is None:
+            raise KeyError(f"run not found: {decision.run_id}")
+        if run.status is not RunStatus.WAITING_HUMAN:
+            raise ValueError(f"run is not waiting for human review: {run.status}")
+        request.resolved_at = now_utc()
+        with self.workspace.connect() as connection:
+            connection.execute(
+                """UPDATE human_review_requests SET resolved_at=?, payload=? WHERE id=?""",
+                (request.resolved_at.isoformat(), request.model_dump_json(), str(request.id)),
+            )
+            connection.execute(
+                """INSERT INTO human_decisions
+                (id, request_id, run_id, decision, actor, created_at, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(decision.id),
+                    str(decision.request_id),
+                    str(decision.run_id),
+                    decision.decision,
+                    decision.actor,
+                    decision.created_at.isoformat(),
+                    decision.model_dump_json(),
+                ),
+            )
+        if decision.decision in {
+            HumanDecisionType.ACCEPT,
+            HumanDecisionType.EDIT_ACCEPT,
+            HumanDecisionType.RETRY,
+        }:
+            return self.transition(run, RunStatus.INTERRUPTED)
+        if decision.decision is HumanDecisionType.REJECT:
+            return self.transition(run, RunStatus.FAILED, error=decision.reason or "human rejected")
+        return self.transition(run, RunStatus.CANCELLED)
 
     def append_event(self, event: PhaseEvent) -> None:
         with self.workspace.connect() as connection:
@@ -580,6 +647,23 @@ CREATE TABLE IF NOT EXISTS workflow_checkpoints (
     run_id TEXT PRIMARY KEY REFERENCES runs(id),
     workflow TEXT NOT NULL,
     next_step_index INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS human_review_requests (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    phase TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS human_decisions (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES human_review_requests(id),
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    decision TEXT NOT NULL,
+    actor TEXT NOT NULL,
     created_at TEXT NOT NULL,
     payload TEXT NOT NULL
 );

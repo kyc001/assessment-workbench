@@ -6,7 +6,7 @@ from uuid import UUID
 import typer
 
 from assessment_workbench.config import Settings
-from assessment_workbench.domain import MaterialKind, QuestionType
+from assessment_workbench.domain import HumanDecision, HumanDecisionType, MaterialKind, QuestionType
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
 from assessment_workbench.models import OpenAICompatibleModel
 from assessment_workbench.parsers import FixtureParser, MinerUApiParser, MinerUCliParser
@@ -198,3 +198,73 @@ def inspect_run(
     typer.echo("\nEVENTS")
     for event in store.events(run_id):
         typer.echo(f"{event.status}\t{event.phase}\t{event.occurrence_id}")
+    request = store.pending_human_review(run_id)
+    if request:
+        typer.echo("\nHUMAN REVIEW")
+        typer.echo(request.model_dump_json(indent=2))
+
+
+def _resolve_human(
+    run_id: UUID,
+    decision_type: HumanDecisionType,
+    actor: str,
+    reason: str,
+    workspace_path: Path | None,
+) -> None:
+    store = RunStore(_workspace(workspace_path))
+    request = store.pending_human_review(run_id)
+    if request is None:
+        typer.echo(f"No pending human review for run: {run_id}", err=True)
+        raise typer.Exit(1)
+    run = store.resolve_human_review(
+        HumanDecision(
+            request_id=request.id,
+            run_id=run_id,
+            decision=decision_type,
+            actor=actor,
+            reason=reason,
+            input_artifact_ids=request.artifact_ids,
+        )
+    )
+    typer.echo(f"Run: {run.id}")
+    typer.echo(f"Status: {run.status}")
+
+
+@runs_app.command("approve")
+def approve_run(
+    run_id: UUID,
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    _resolve_human(run_id, HumanDecisionType.ACCEPT, actor, reason, workspace_path)
+
+
+@runs_app.command("reject")
+def reject_run(
+    run_id: UUID,
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    _resolve_human(run_id, HumanDecisionType.REJECT, actor, reason, workspace_path)
+
+
+@runs_app.command("retry")
+def retry_run(
+    run_id: UUID,
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    _resolve_human(run_id, HumanDecisionType.RETRY, actor, reason, workspace_path)
+
+
+@runs_app.command("abort")
+def abort_run(
+    run_id: UUID,
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    _resolve_human(run_id, HumanDecisionType.ABORT, actor, reason, workspace_path)

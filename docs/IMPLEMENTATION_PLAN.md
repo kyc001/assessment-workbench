@@ -117,11 +117,11 @@ uv run assessment-workbench --help
 
 ## M1.5 人工决策
 
-- [ ] 定义 `HumanDecision`：接受、拒绝、编辑后接受、重试、终止。
-- [ ] 工作流可以进入 `WAITING_HUMAN` 并保存待确认对象。
-- [ ] 实现 `runs approve/reject/retry` CLI。
+- [x] 定义 `HumanDecision`：接受、拒绝、编辑后接受、重试、终止。
+- [x] 工作流可以进入 `WAITING_HUMAN` 并保存待确认对象。
+- [x] 实现 `runs approve/reject/retry/abort` CLI；通过后进入可恢复状态。
 - [ ] 人工编辑内容形成新版本，不覆盖 Agent 产物。
-- [ ] 记录操作者、时间、理由和前后版本。
+- [x] 记录操作者、时间、理由和输入/输出版本引用。
 
 完成定义：
 
@@ -721,7 +721,7 @@ M11 CLI 和 M12 评测/安全贯穿 M1-M10
 - [x] M1-B：建立 Artifact 表、原子写入和完整性校验。
 - [x] M1-C：实现状态转换矩阵和 `CANCELLING`。
 - [x] M1-D：实现检查点和引擎级 resume；CLI 工作流注册随各业务流接入。
-- [ ] M1-E：实现 `HumanDecision` 与 `runs approve/reject/retry`。
+- [x] M1-E：实现 `HumanDecision` 与 `runs approve/reject/retry/abort`。
 - [ ] M1-F：实现进程启动时的 interrupted run 恢复策略。
 - [ ] M1-G：补齐失败、取消、恢复、父子 run 和人工等待测试。
 
