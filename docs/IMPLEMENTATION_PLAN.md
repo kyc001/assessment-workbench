@@ -396,7 +396,7 @@ uv run assessment-workbench --help
 - [ ] 单题失败不重做整卷。
 - [ ] `QUESTIONS_GENERATING/SOLVING/RUBRICS_BUILDING`。
 - [ ] `QUESTIONS_REVIEWING/ARBITRATING`。
-- [ ] `EXAM_ASSEMBLING`。
+- [x] `EXAM_ASSEMBLING` 首个离线高考数学 Demo 实现。
 
 ## M6.4 整卷审核和仲裁
 

@@ -372,6 +372,26 @@ class ExamQuestionBundle(BaseModel):
         return self
 
 
+class ExamDocument(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    blueprint_id: str
+    title: str
+    subject_profile: str
+    duration_minutes: int = Field(ge=1)
+    total_score: int = Field(ge=1)
+    questions: list[ExamQuestionBundle] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_exam(self) -> "ExamDocument":
+        numbers = [bundle.question.number for bundle in self.questions]
+        if numbers != list(range(1, len(numbers) + 1)):
+            raise ValueError("exam question numbers must be consecutive starting at 1")
+        score = sum(bundle.question.score for bundle in self.questions)
+        if score != self.total_score:
+            raise ValueError(f"exam question scores total {score}, expected {self.total_score}")
+        return self
+
+
 class ModelUsage(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None

@@ -6,6 +6,7 @@ from uuid import UUID
 import typer
 
 from assessment_workbench.config import Settings
+from assessment_workbench.demo_exam import GaokaoMathDemoWorkflow
 from assessment_workbench.domain import HumanDecision, HumanDecisionType, MaterialKind, QuestionType
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
 from assessment_workbench.models import OpenAICompatibleModel
@@ -27,12 +28,14 @@ topics_app = typer.Typer(help="Browse course knowledge points")
 runs_app = typer.Typer(help="Inspect workflow runs")
 knowledge_app = typer.Typer(help="Search course knowledge")
 questions_app = typer.Typer(help="Plan and generate questions")
+exams_app = typer.Typer(help="Plan, generate, and export exams")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(materials_app, name="materials")
 app.add_typer(topics_app, name="topics")
 app.add_typer(runs_app, name="runs")
 app.add_typer(knowledge_app, name="knowledge")
 app.add_typer(questions_app, name="questions")
+app.add_typer(exams_app, name="exams")
 
 
 def _workspace(path: Path | None) -> Workspace:
@@ -324,3 +327,24 @@ def abort_run(
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     _resolve_human(run_id, HumanDecisionType.ABORT, actor, reason, workspace_path)
+
+
+@exams_app.command("demo-gaokao-math")
+def generate_gaokao_math_demo(
+    blueprint: Annotated[Path, typer.Option()] = Path("examples/gaokao-mathematics/blueprint.yaml"),
+    questions: Annotated[Path, typer.Option()] = Path("examples/gaokao-mathematics/questions.yaml"),
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    workflow = GaokaoMathDemoWorkflow(ArtifactStore(workspace), RunStore(workspace))
+    run, state = asyncio.run(workflow.execute(blueprint, questions))
+    typer.echo(f"Run: {run.id}")
+    typer.echo(f"Status: {run.status}")
+    if run.error:
+        typer.echo(f"Error: {run.error}", err=True)
+        raise typer.Exit(1)
+    exam = state["exam"]
+    typer.echo(f"Questions: {len(exam.questions)}")
+    typer.echo(f"Total score: {exam.total_score}")
+    for artifact in state["artifacts"]:
+        typer.echo(f"Artifact: {workspace.root / artifact.path}")
