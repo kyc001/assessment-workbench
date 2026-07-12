@@ -65,3 +65,39 @@ def test_cancel_request_uses_cancelling_state(tmp_path: Path) -> None:
 
     assert store.request_cancel(queued.id).status is RunStatus.CANCELLED
     assert store.request_cancel(running.id).status is RunStatus.CANCELLING
+
+
+async def test_resume_starts_after_last_checkpoint(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    engine = WorkflowEngine(store)
+    calls: list[str] = []
+
+    async def first(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("first")
+        return {"stable": "saved"}
+
+    async def interrupt(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("interrupt")
+        raise KeyboardInterrupt
+
+    run, _ = await engine.execute("resumable", [("FIRST", first), ("SECOND", interrupt)])
+    assert run.status is RunStatus.INTERRUPTED
+    checkpoint = store.get_checkpoint(run.id)
+    assert checkpoint is not None
+    assert checkpoint.next_step_index == 1
+
+    async def second(state: dict[str, Any]) -> dict[str, Any]:
+        calls.append("second")
+        assert state["stable"] == "saved"
+        return {"done": True}
+
+    resumed, state = await engine.resume(
+        run.id, "resumable", [("FIRST", first), ("SECOND", second)]
+    )
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert state["done"] is True
+    assert calls == ["first", "interrupt", "second"]
+    assert store.get_checkpoint(run.id) is None

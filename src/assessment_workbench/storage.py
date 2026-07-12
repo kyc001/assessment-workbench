@@ -18,6 +18,7 @@ from assessment_workbench.domain import (
     PhaseEvent,
     RetrievalHit,
     RunStatus,
+    WorkflowCheckpoint,
     WorkflowRun,
     now_utc,
     validate_run_transition,
@@ -92,6 +93,32 @@ class RunStore:
         if run.status is RunStatus.QUEUED:
             return self.transition(run, RunStatus.CANCELLED)
         return self.transition(run, RunStatus.CANCELLING)
+
+    def save_checkpoint(self, checkpoint: WorkflowCheckpoint) -> None:
+        with self.workspace.connect() as connection:
+            connection.execute(
+                """INSERT OR REPLACE INTO workflow_checkpoints
+                (run_id, workflow, next_step_index, created_at, payload)
+                VALUES (?, ?, ?, ?, ?)""",
+                (
+                    str(checkpoint.run_id),
+                    checkpoint.workflow,
+                    checkpoint.next_step_index,
+                    checkpoint.created_at.isoformat(),
+                    checkpoint.model_dump_json(),
+                ),
+            )
+
+    def get_checkpoint(self, run_id: UUID) -> WorkflowCheckpoint | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM workflow_checkpoints WHERE run_id=?", (str(run_id),)
+            ).fetchone()
+        return WorkflowCheckpoint.model_validate_json(row["payload"]) if row else None
+
+    def clear_checkpoint(self, run_id: UUID) -> None:
+        with self.workspace.connect() as connection:
+            connection.execute("DELETE FROM workflow_checkpoints WHERE run_id=?", (str(run_id),))
 
     def append_event(self, event: PhaseEvent) -> None:
         with self.workspace.connect() as connection:
@@ -548,5 +575,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at TEXT NOT NULL,
     payload TEXT NOT NULL,
     UNIQUE(run_id, logical_name, version)
+);
+CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id),
+    workflow TEXT NOT NULL,
+    next_step_index INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL
 );
 """

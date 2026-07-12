@@ -236,6 +236,14 @@ class WorkflowRun(BaseModel):
     error: str | None = None
 
 
+class WorkflowCheckpoint(BaseModel):
+    run_id: UUID
+    workflow: str
+    next_step_index: int = Field(ge=0)
+    context: dict[str, str | int | float | bool | None | list[str]]
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class PhaseEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     run_id: UUID

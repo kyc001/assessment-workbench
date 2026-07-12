@@ -108,11 +108,11 @@ uv run assessment-workbench --help
 
 ## M1.4 检查点、恢复和取消
 
-- [ ] 每个成功阶段保存检查点及可序列化上下文引用。
-- [ ] 实现 `runs resume <run-id>`，从最后一个幂等阶段继续。
+- [x] 每个成功阶段保存检查点及可序列化上下文引用。
+- [x] 实现工作流引擎 `resume`，从最后一个幂等阶段继续；CLI 注册表将在后续工作流逐项接入。
 - [ ] 实现 `runs cancel <run-id>` 和协作式取消令牌。
 - [ ] 进程异常退出后将 `RUNNING` 标记为 `INTERRUPTED`。
-- [ ] 恢复时不重复执行已完成的昂贵模型调用。
+- [x] 恢复时不重复执行已完成阶段；模型调用需通过 artifact/checkpoint 输出引用接入。
 - [ ] 为非幂等阶段定义补偿或禁止自动恢复。
 
 ## M1.5 人工决策
@@ -720,7 +720,7 @@ M11 CLI 和 M12 评测/安全贯穿 M1-M10
 - [x] M1-A：扩展 PhaseEvent 的 workflow、parent run/event、input/output artifact 字段。
 - [x] M1-B：建立 Artifact 表、原子写入和完整性校验。
 - [x] M1-C：实现状态转换矩阵和 `CANCELLING`。
-- [ ] M1-D：实现检查点和 `runs resume`。
+- [x] M1-D：实现检查点和引擎级 resume；CLI 工作流注册随各业务流接入。
 - [ ] M1-E：实现 `HumanDecision` 与 `runs approve/reject/retry`。
 - [ ] M1-F：实现进程启动时的 interrupted run 恢复策略。
 - [ ] M1-G：补齐失败、取消、恢复、父子 run 和人工等待测试。
