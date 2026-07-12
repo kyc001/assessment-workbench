@@ -1,0 +1,25 @@
+id: gaokao-mathematics
+display_name: 高考数学
+version: "1"
+supported_question_types:
+  - multiple_choice
+  - fill_blank
+  - calculation
+  - proof
+reviewers:
+  - mathematical_correctness
+  - solvability
+  - proof_completeness
+  - rubric_quality
+  - pedagogical_quality
+  - structural
+  - similarity
+tools:
+  - sympy
+  - numerical_sampler
+latex_template: templates/gaokao-mathematics
+difficulty_dimensions:
+  - conceptual
+  - reasoning
+  - calculation
+  - overall

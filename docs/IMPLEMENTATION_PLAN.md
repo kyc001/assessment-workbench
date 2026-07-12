@@ -262,10 +262,10 @@ uv run assessment-workbench --help
 
 目标：审核器、工具和题型由科目配置驱动，主状态机不硬编码物理。
 
-- [ ] 定义 `SubjectProfile` Pydantic Schema。
-- [ ] 支持题型、Reviewer、工具、LaTeX 模板和难度维度配置。
+- [x] 定义 `SubjectProfile` Pydantic Schema。
+- [x] 支持题型、Reviewer、工具、LaTeX 模板和难度维度配置。
 - [ ] 提供 `physics.yaml`。
-- [ ] 提供 `mathematics.yaml`。
+- [x] 提供首个 `gaokao-mathematics.yaml` 数学 Profile。
 - [ ] 加载时校验 Reviewer 和工具是否已注册。
 - [ ] 定义 `SubjectTool` 协议。
 - [ ] 接入 SymPy 符号验证。
@@ -354,8 +354,8 @@ uv run assessment-workbench --help
 
 ## M6.1 ExamBlueprint
 
-- [ ] 定义 `ExamBlueprint`、Section、Coverage、DifficultyDistribution。
-- [ ] 校验总分、各区分值和题量。
+- [x] 定义 `ExamBlueprint`、Section、Coverage、DifficultyDistribution。
+- [x] 校验总分、各区分值、覆盖分值和题量。
 - [ ] 支持目标年级、考试时长、语言和材料范围。
 - [ ] 支持用户 YAML 规格和 Agent 规划两种来源。
 

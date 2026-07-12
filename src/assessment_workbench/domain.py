@@ -167,6 +167,74 @@ class QuestionType(StrEnum):
     EXPERIMENT = "experiment"
 
 
+class SubjectProfile(BaseModel):
+    id: str
+    display_name: str
+    supported_question_types: list[QuestionType] = Field(min_length=1)
+    reviewers: list[str] = Field(min_length=1)
+    tools: list[str] = Field(default_factory=list)
+    latex_template: str
+    difficulty_dimensions: list[str] = Field(min_length=1)
+    version: str = "1"
+
+
+class ExamSectionBlueprint(BaseModel):
+    id: str
+    title: str
+    question_type: QuestionType
+    count: int = Field(ge=1)
+    score_each: int = Field(ge=1)
+    topic_tags: list[str] = Field(default_factory=list)
+
+    @property
+    def total_score(self) -> int:
+        return self.count * self.score_each
+
+
+class CoverageTarget(BaseModel):
+    topic_tag: str
+    target_score: int = Field(ge=1)
+
+
+class DifficultyDistribution(BaseModel):
+    easy: float = Field(ge=0, le=1)
+    medium: float = Field(ge=0, le=1)
+    hard: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_total(self) -> "DifficultyDistribution":
+        if abs(self.easy + self.medium + self.hard - 1.0) > 1e-6:
+            raise ValueError("difficulty distribution must sum to 1")
+        return self
+
+
+class ExamBlueprint(BaseModel):
+    id: str
+    subject_profile: str
+    title: str
+    target_level: str
+    duration_minutes: int = Field(ge=1)
+    total_score: int = Field(ge=1)
+    language: str = "zh-CN"
+    sections: list[ExamSectionBlueprint] = Field(min_length=1)
+    coverage: list[CoverageTarget] = Field(default_factory=list)
+    difficulty_distribution: DifficultyDistribution
+    constraints: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_scores(self) -> "ExamBlueprint":
+        section_score = sum(section.total_score for section in self.sections)
+        if section_score != self.total_score:
+            raise ValueError(f"section scores total {section_score}, expected {self.total_score}")
+        coverage_score = sum(item.target_score for item in self.coverage)
+        if self.coverage and coverage_score != self.total_score:
+            raise ValueError(f"coverage scores total {coverage_score}, expected {self.total_score}")
+        section_ids = [section.id for section in self.sections]
+        if len(section_ids) != len(set(section_ids)):
+            raise ValueError("exam section ids must be unique")
+        return self
+
+
 class DifficultyProfile(BaseModel):
     conceptual: int = Field(default=5, ge=1, le=10)
     reasoning: int = Field(default=5, ge=1, le=10)
