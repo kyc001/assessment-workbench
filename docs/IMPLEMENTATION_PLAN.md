@@ -287,12 +287,12 @@ uv run assessment-workbench --help
 ## M5.1 领域对象和版本
 
 - [x] `QuestionSpec` 基础模型和来源上下文。
-- [ ] `Question/QuestionVersion`。
-- [ ] `Solution/SolutionStep/SolutionVersion`。
-- [ ] `Rubric/RubricItem/RubricVersion`。
+- [x] `QuestionVersion` 与父版本、来源和生成元数据。
+- [x] `Solution/SolutionStep/SolutionVersion`。
+- [x] `Rubric/RubricItem/RubricVersion`。
 - [ ] `ReviewReport/ReviewFinding`。
 - [ ] `ArbitrationDecision/ArbitrationFeedback`。
-- [ ] 每个版本保存 parent version、生成角色、Prompt 版本和来源引用。
+- [x] 每个版本保存 parent version、生成角色、模型、Prompt 版本和来源引用。
 
 ## M5.2 状态机
 
@@ -308,9 +308,9 @@ uv run assessment-workbench --help
 
 ## M5.3 Rubric
 
-- [ ] Rubric 分项之和必须等于题目分值。
-- [ ] 支持依赖评分点、部分分、等价表达和替代解法。
-- [ ] 支持 error carry-forward 策略。
+- [x] Rubric 分项之和必须等于题目分值。
+- [x] 支持依赖评分点、部分分、等价表达和替代解法策略。
+- [x] 支持 error carry-forward 策略字段。
 - [ ] 评分点分别审核正确性、独立性、分值合理性和重复计分。
 
 ## M5.4 Reviewer Pool

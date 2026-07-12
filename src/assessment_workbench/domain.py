@@ -254,6 +254,124 @@ class QuestionSpec(BaseModel):
     constraints: list[str] = Field(default_factory=list)
 
 
+class GenerationMetadata(BaseModel):
+    role: str
+    model: str = "fixture"
+    prompt_version: str = "fixture-v1"
+    source_refs: list[SourceReference] = Field(default_factory=list)
+
+
+class QuestionVersion(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    question_id: UUID
+    version: int = Field(ge=1)
+    parent_version_id: UUID | None = None
+    number: int = Field(ge=1)
+    question_type: QuestionType
+    topic_tags: list[str] = Field(min_length=1)
+    score: int = Field(ge=1)
+    statement: str = Field(min_length=1)
+    options: list[str] = Field(default_factory=list)
+    answer_format: str = "show_work"
+    metadata: GenerationMetadata
+
+    @model_validator(mode="after")
+    def validate_options(self) -> "QuestionVersion":
+        if self.question_type is QuestionType.MULTIPLE_CHOICE and len(self.options) < 4:
+            raise ValueError("multiple-choice questions require at least four options")
+        if self.question_type is not QuestionType.MULTIPLE_CHOICE and self.options:
+            raise ValueError("only multiple-choice questions may define options")
+        return self
+
+
+class SolutionStep(BaseModel):
+    id: str
+    description: str = Field(min_length=1)
+    expression: str | None = None
+    conclusion: str | None = None
+    required: bool = True
+
+
+class SolutionVersion(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    solution_id: UUID
+    question_version_id: UUID
+    version: int = Field(ge=1)
+    parent_version_id: UUID | None = None
+    steps: list[SolutionStep] = Field(min_length=1)
+    final_answer: str = Field(min_length=1)
+    alternative_solutions: list[list[SolutionStep]] = Field(default_factory=list)
+    verification_notes: list[str] = Field(default_factory=list)
+    metadata: GenerationMetadata
+
+
+class PartialCreditLevel(BaseModel):
+    score: int = Field(ge=0)
+    condition: str = Field(min_length=1)
+
+
+class RubricItem(BaseModel):
+    id: str
+    description: str = Field(min_length=1)
+    score: int = Field(ge=1)
+    depends_on: list[str] = Field(default_factory=list)
+    equivalent_expressions: list[str] = Field(default_factory=list)
+    partial_credit: list[PartialCreditLevel] = Field(default_factory=list)
+    carry_forward: bool = False
+
+    @model_validator(mode="after")
+    def validate_partial_credit(self) -> "RubricItem":
+        if any(level.score >= self.score for level in self.partial_credit):
+            raise ValueError("partial credit must be less than the rubric item score")
+        return self
+
+
+class RubricVersion(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    rubric_id: UUID
+    question_version_id: UUID
+    solution_version_id: UUID
+    version: int = Field(ge=1)
+    parent_version_id: UUID | None = None
+    max_score: int = Field(ge=1)
+    items: list[RubricItem] = Field(min_length=1)
+    alternative_solution_policy: str = "award_equivalent_method_credit"
+    metadata: GenerationMetadata
+
+    @model_validator(mode="after")
+    def validate_items(self) -> "RubricVersion":
+        item_ids = [item.id for item in self.items]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("rubric item ids must be unique")
+        if sum(item.score for item in self.items) != self.max_score:
+            raise ValueError("rubric item scores must sum to max_score")
+        known = set(item_ids)
+        for item in self.items:
+            if not set(item.depends_on) <= known:
+                raise ValueError(f"rubric item {item.id} depends on an unknown item")
+            if item.id in item.depends_on:
+                raise ValueError(f"rubric item {item.id} cannot depend on itself")
+        return self
+
+
+class ExamQuestionBundle(BaseModel):
+    question: QuestionVersion
+    solution: SolutionVersion
+    rubric: RubricVersion
+
+    @model_validator(mode="after")
+    def validate_links(self) -> "ExamQuestionBundle":
+        if self.solution.question_version_id != self.question.id:
+            raise ValueError("solution does not reference the bundled question version")
+        if self.rubric.question_version_id != self.question.id:
+            raise ValueError("rubric does not reference the bundled question version")
+        if self.rubric.solution_version_id != self.solution.id:
+            raise ValueError("rubric does not reference the bundled solution version")
+        if self.rubric.max_score != self.question.score:
+            raise ValueError("rubric max_score must match the question score")
+        return self
+
+
 class ModelUsage(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
