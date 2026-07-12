@@ -1,0 +1,14 @@
+course_id: demo-physics
+title: 电磁学阶段测验
+duration_minutes: 90
+total_score: 100
+topics:
+  - 电磁学.静电场.高斯定律
+  - 电磁学.电磁波.介质边界条件
+sections:
+  - type: calculation
+    count: 3
+    total_score: 60
+  - type: proof
+    count: 2
+    total_score: 40

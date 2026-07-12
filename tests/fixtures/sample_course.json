@@ -1,0 +1,60 @@
+{
+  "document": {
+    "id": "doc-demo-physics-01",
+    "source_path": "semester-physics.pdf",
+    "title": "大学物理：电磁学",
+    "parser": "fixture",
+    "parser_version": "1",
+    "blocks": [
+      {
+        "id": "b1",
+        "kind": "heading",
+        "page": 1,
+        "content": "电磁学",
+        "heading_path": ["电磁学"]
+      },
+      {
+        "id": "b2",
+        "kind": "text",
+        "page": 1,
+        "content": "本章研究电场、磁场及其相互关系。",
+        "heading_path": ["电磁学"]
+      },
+      {
+        "id": "b3",
+        "kind": "heading",
+        "page": 3,
+        "content": "静电场",
+        "heading_path": ["电磁学", "静电场"]
+      },
+      {
+        "id": "b4",
+        "kind": "heading",
+        "page": 5,
+        "content": "高斯定律",
+        "heading_path": ["电磁学", "静电场", "高斯定律"]
+      },
+      {
+        "id": "b5",
+        "kind": "equation",
+        "page": 5,
+        "content": "\\oint_S \\mathbf{E} \\cdot \\mathrm{d}\\mathbf{S}=Q/\\varepsilon_0",
+        "heading_path": ["电磁学", "静电场", "高斯定律"]
+      },
+      {
+        "id": "b6",
+        "kind": "heading",
+        "page": 12,
+        "content": "电磁波",
+        "heading_path": ["电磁学", "电磁波"]
+      },
+      {
+        "id": "b7",
+        "kind": "heading",
+        "page": 15,
+        "content": "介质边界条件",
+        "heading_path": ["电磁学", "电磁波", "介质边界条件"]
+      }
+    ]
+  }
+}
