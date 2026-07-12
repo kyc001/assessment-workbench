@@ -5,6 +5,7 @@ from uuid import UUID
 
 import typer
 
+from assessment_workbench.agents import ExamAgentWorkflow, ModelRouter
 from assessment_workbench.config import Settings
 from assessment_workbench.domain import HumanDecision, HumanDecisionType, MaterialKind, QuestionType
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
@@ -326,3 +327,58 @@ def abort_run(
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     _resolve_human(run_id, HumanDecisionType.ABORT, actor, reason, workspace_path)
+
+
+@exams_app.command("generate")
+def generate_exam(
+    subject: Annotated[str, typer.Option(help="Subject to research and assess")],
+    target_level: Annotated[str, typer.Option(help="Learner or examination level")],
+    requirements: Annotated[str, typer.Option(help="Exam requirements and constraints")],
+    source: Annotated[
+        Path | None,
+        typer.Option(help="Optional UTF-8 source context prepared from course materials"),
+    ] = None,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    if source is not None and not source.is_file():
+        raise typer.BadParameter(f"source file does not exist: {source}")
+    settings = Settings()
+    audit_store = LocalKnowledgeBackend(workspace)
+    standard = OpenAICompatibleModel(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        audit_store=audit_store,
+        timeout=settings.http_timeout,
+    )
+    strong = OpenAICompatibleModel(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_strong_model,
+        audit_store=audit_store,
+        timeout=settings.http_timeout,
+    )
+    workflow = ExamAgentWorkflow(
+        ModelRouter(standard=standard, strong=strong),
+        ArtifactStore(workspace),
+        RunStore(workspace),
+    )
+    run, state = asyncio.run(
+        workflow.execute(
+            subject=subject,
+            target_level=target_level,
+            requirements=requirements,
+            source_context=source.read_text(encoding="utf-8") if source else "",
+        )
+    )
+    typer.echo(f"Run: {run.id}")
+    typer.echo(f"Status: {run.status}")
+    if run.error:
+        typer.echo(f"Error: {run.error}", err=True)
+        raise typer.Exit(1)
+    exam = state["exam"]
+    typer.echo(f"Questions: {len(exam.questions)}")
+    typer.echo(f"Total score: {exam.total_score}")
+    for artifact in state["artifacts"]:
+        typer.echo(f"Artifact: {workspace.root / artifact.path}")

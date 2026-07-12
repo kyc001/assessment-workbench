@@ -3,7 +3,7 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def now_utc() -> datetime:
@@ -390,6 +390,101 @@ class ExamDocument(BaseModel):
         if score != self.total_score:
             raise ValueError(f"exam question scores total {score}, expected {self.total_score}")
         return self
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class SubjectProfileCandidate(StrictModel):
+    subject_id: str
+    display_name: str
+    supported_question_types: list[QuestionType] = Field(min_length=1)
+    reviewers: list[str] = Field(min_length=1)
+    tools: list[str] = Field(default_factory=list)
+    difficulty_dimensions: list[str] = Field(min_length=1)
+    conventions: list[str] = Field(default_factory=list)
+    source_summary: str = Field(min_length=1)
+
+
+class BlueprintDraft(StrictModel):
+    title: str
+    target_level: str
+    duration_minutes: int = Field(ge=1)
+    total_score: int = Field(ge=1)
+    language: str = "zh-CN"
+    sections: list[ExamSectionBlueprint] = Field(min_length=1)
+    coverage: list[CoverageTarget] = Field(default_factory=list)
+    difficulty_distribution: DifficultyDistribution
+    constraints: list[str] = Field(default_factory=list)
+
+
+class QuestionDraft(StrictModel):
+    statement: str = Field(min_length=1)
+    options: list[str] = Field(default_factory=list)
+    answer_format: str = "show_work"
+    topic_tags: list[str] = Field(min_length=1)
+
+
+class SolutionDraft(StrictModel):
+    steps: list[SolutionStep] = Field(min_length=1)
+    final_answer: str = Field(min_length=1)
+    alternative_solutions: list[list[SolutionStep]] = Field(default_factory=list)
+    verification_notes: list[str] = Field(default_factory=list)
+
+
+class RubricDraft(StrictModel):
+    items: list[RubricItem] = Field(min_length=1)
+    alternative_solution_policy: str = "award_equivalent_method_credit"
+
+
+class FindingSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    FATAL = "fatal"
+
+
+class FindingTarget(StrEnum):
+    QUESTION = "question"
+    SOLUTION = "solution"
+    RUBRIC = "rubric"
+    BUNDLE = "bundle"
+
+
+class ReviewFinding(StrictModel):
+    code: str
+    severity: FindingSeverity
+    target: FindingTarget
+    message: str
+    suggested_action: str = ""
+
+
+class ReviewReport(StrictModel):
+    reviewer: str
+    passed: bool
+    findings: list[ReviewFinding] = Field(default_factory=list)
+    summary: str = ""
+
+
+class ArbitrationAction(StrEnum):
+    PASS = "pass"
+    PASS_WITH_WARNINGS = "pass_with_warnings"
+    RETRY_PROBLEM = "retry_problem"
+    RETRY_SOLUTION = "retry_solution"
+    RETRY_RUBRIC = "retry_rubric"
+    RETRY_ALL = "retry_all"
+    ESCALATE_HUMAN = "escalate_human"
+    ABORT = "abort"
+
+
+class ArbitrationDecision(StrictModel):
+    action: ArbitrationAction
+    rationale: str
+    finding_codes: list[str] = Field(default_factory=list)
+    writer_feedback: list[str] = Field(default_factory=list)
+    solver_feedback: list[str] = Field(default_factory=list)
+    rubric_feedback: list[str] = Field(default_factory=list)
 
 
 class ModelUsage(BaseModel):

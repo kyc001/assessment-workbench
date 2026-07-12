@@ -14,3 +14,4 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
+    llm_strong_model: str = "gpt-4.1"
