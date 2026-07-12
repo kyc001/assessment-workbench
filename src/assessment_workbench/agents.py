@@ -94,7 +94,7 @@ class ExamAgentWorkflow:
                 id=candidate.subject_id,
                 display_name=candidate.display_name,
                 supported_question_types=candidate.supported_question_types,
-                reviewers=candidate.reviewers,
+                reviewers=[reviewer.value for reviewer in candidate.reviewers],
                 tools=candidate.tools,
                 latex_template="generic-v1",
                 difficulty_dimensions=candidate.difficulty_dimensions,

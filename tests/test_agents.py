@@ -14,6 +14,7 @@ from assessment_workbench.domain import (
     ExamSectionBlueprint,
     QuestionDraft,
     QuestionType,
+    ReviewerName,
     ReviewFinding,
     ReviewReport,
     RubricDraft,
@@ -43,7 +44,7 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
         subject_id="mathematics",
         display_name="Mathematics",
         supported_question_types=[QuestionType.CALCULATION],
-        reviewers=["solvability", "structure"],
+        reviewers=[ReviewerName.SOLVABILITY, ReviewerName.STRUCTURE],
         difficulty_dimensions=["reasoning"],
         source_summary="User requirements",
     )

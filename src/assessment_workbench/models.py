@@ -1,11 +1,12 @@
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from assessment_workbench.domain import ModelCall, ModelUsage
 from assessment_workbench.ports import ModelAuditStore
@@ -52,7 +53,7 @@ class OpenAICompatibleModel:
                 "json_schema": {
                     "name": response_model.__name__,
                     "strict": True,
-                    "schema": response_model.model_json_schema(),
+                    "schema": _strict_schema(response_model.model_json_schema()),
                 },
             },
             "temperature": 0,
@@ -67,18 +68,28 @@ class OpenAICompatibleModel:
         )
         self.audit_store.save_model_call(call)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=request,
-                )
-                response.raise_for_status()
-                payload = response.json()
-            content = payload["choices"][0]["message"]["content"]
-            if not isinstance(content, str):
-                raise ValueError("model response content is not text")
-            result = response_model.model_validate_json(content)
+            payload = await self._post(request)
+            content = _response_content(payload)
+            try:
+                result = response_model.model_validate_json(content)
+            except ValidationError as exc:
+                repair_request = dict(request)
+                messages = list(cast(list[dict[str, str]], request["messages"]))
+                repair_request["messages"] = [
+                    *messages,
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "The previous JSON failed schema validation. Return a corrected JSON "
+                            "object only, preserving valid content. Validation errors: "
+                            f"{json.dumps(exc.errors(include_url=False), default=str)}"
+                        ),
+                    },
+                ]
+                payload = await self._post(repair_request)
+                content = _response_content(payload)
+                result = response_model.model_validate_json(content)
             usage = payload.get("usage", {})
             call.status = "succeeded"
             call.response_sha256 = hashlib.sha256(content.encode()).hexdigest()
@@ -93,7 +104,72 @@ class OpenAICompatibleModel:
             self.audit_store.save_model_call(call)
             raise
 
+    async def _post(self, request: dict[str, Any]) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for attempt in range(3):
+                try:
+                    response = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        json=request,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    if not isinstance(payload, dict):
+                        raise ValueError("model response payload is not an object")
+                    return payload
+                except (httpx.TimeoutException, httpx.NetworkError):
+                    if attempt == 2:
+                        raise
+                except httpx.HTTPStatusError as exc:
+                    if attempt == 2 or exc.response.status_code not in {
+                        429,
+                        502,
+                        503,
+                        504,
+                        524,
+                    }:
+                        raise
+                await asyncio.sleep(0.5 * (2**attempt))
+        raise RuntimeError("model request retry loop exited unexpectedly")
+
 
 def _sha(payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _response_content(payload: dict[str, Any]) -> str:
+    content = payload["choices"][0]["message"]["content"]
+    if not isinstance(content, str):
+        raise ValueError("model response content is not text")
+    return content
+
+
+def _strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(schema)
+    properties = normalized.get("properties")
+    if isinstance(properties, dict):
+        normalized["additionalProperties"] = False
+        normalized["required"] = list(properties)
+        normalized["properties"] = {
+            key: _strict_schema(value) if isinstance(value, dict) else value
+            for key, value in properties.items()
+        }
+    for key in ("$defs", "definitions"):
+        definitions = normalized.get(key)
+        if isinstance(definitions, dict):
+            normalized[key] = {
+                name: _strict_schema(value) if isinstance(value, dict) else value
+                for name, value in definitions.items()
+            }
+    items = normalized.get("items")
+    if isinstance(items, dict):
+        normalized["items"] = _strict_schema(items)
+    for key in ("anyOf", "oneOf", "allOf"):
+        variants = normalized.get(key)
+        if isinstance(variants, list):
+            normalized[key] = [
+                _strict_schema(value) if isinstance(value, dict) else value for value in variants
+            ]
+    return normalized

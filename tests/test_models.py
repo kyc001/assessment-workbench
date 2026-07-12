@@ -4,7 +4,7 @@ import httpx
 import respx
 from pydantic import BaseModel
 
-from assessment_workbench.models import OpenAICompatibleModel
+from assessment_workbench.models import OpenAICompatibleModel, _strict_schema
 from assessment_workbench.storage import LocalKnowledgeBackend, Workspace
 
 
@@ -43,3 +43,22 @@ async def test_openai_compatible_structured_response(tmp_path: Path) -> None:
     assert result.value == "ok"
     request = route.calls[0].request
     assert request.headers["authorization"] == "Bearer secret"
+
+
+def test_strict_schema_requires_defaulted_properties_recursively() -> None:
+    schema = _strict_schema(
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "nested": {
+                    "type": "object",
+                    "properties": {"items": {"type": "array", "items": {"type": "string"}}},
+                },
+            },
+        }
+    )
+    assert schema["required"] == ["name", "nested"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["nested"]["required"] == ["items"]
+    assert schema["properties"]["nested"]["additionalProperties"] is False

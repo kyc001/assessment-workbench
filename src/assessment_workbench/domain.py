@@ -396,11 +396,20 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ReviewerName(StrEnum):
+    MATHEMATICAL = "mathematical"
+    SUBJECT = "subject"
+    SOLVABILITY = "solvability"
+    RUBRIC = "rubric"
+    PEDAGOGICAL = "pedagogical"
+    STRUCTURE = "structure"
+
+
 class SubjectProfileCandidate(StrictModel):
     subject_id: str
     display_name: str
     supported_question_types: list[QuestionType] = Field(min_length=1)
-    reviewers: list[str] = Field(min_length=1)
+    reviewers: list[ReviewerName] = Field(min_length=1)
     tools: list[str] = Field(default_factory=list)
     difficulty_dimensions: list[str] = Field(min_length=1)
     conventions: list[str] = Field(default_factory=list)
