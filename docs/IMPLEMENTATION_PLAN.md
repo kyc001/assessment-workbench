@@ -140,8 +140,8 @@ uv run assessment-workbench --help
 
 - [x] 支持 `LECTURE/TEXTBOOK/PAST_EXAM/PAST_SOLUTION/EXERCISE_SET/SYLLABUS/OTHER`。
 - [x] 材料类型写入文档存储。
-- [ ] 定义 `Material` 一等对象：文件哈希、MIME、大小、课程、学期、年份、语言、用途、状态。
-- [ ] 自动检测文件类型和 MIME，同时允许用户覆盖材料用途。
+- [x] 定义 `Material` 一等对象：文件哈希、MIME、大小、课程、学期、年份、语言、用途、状态。
+- [x] 自动检测文件类型和 MIME，同时允许用户指定材料用途和课程元数据。
 - [ ] 支持目录批量导入和单文件失败隔离。
 - [ ] 支持文件哈希去重、解析缓存和增量更新。
 - [ ] 支持删除材料并标记受影响知识节点。

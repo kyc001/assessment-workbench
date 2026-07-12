@@ -17,6 +17,8 @@ from assessment_workbench.domain import (
     HumanReviewRequest,
     KnowledgePoint,
     KnowledgeRelation,
+    Material,
+    MaterialStatus,
     ModelCall,
     ParsedDocument,
     PhaseEvent,
@@ -278,6 +280,83 @@ class RunStore:
                 (str(run_id),),
             ).fetchall()
         return [_event_from_row(row) for row in rows]
+
+
+class MaterialStore:
+    def __init__(self, workspace: Workspace) -> None:
+        self.workspace = workspace
+
+    def create(self, material: Material) -> Material:
+        with self.workspace.connect() as connection:
+            connection.execute(
+                """INSERT INTO materials
+                (id, course_id, kind, original_name, sha256, mime_type, size_bytes,
+                 status, created_at, updated_at, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(material.id),
+                    material.course_id,
+                    material.kind,
+                    material.original_name,
+                    material.sha256,
+                    material.mime_type,
+                    material.size_bytes,
+                    material.status,
+                    material.created_at.isoformat(),
+                    material.updated_at.isoformat(),
+                    material.model_dump_json(),
+                ),
+            )
+        return material
+
+    def save(self, material: Material) -> Material:
+        material.updated_at = now_utc()
+        with self.workspace.connect() as connection:
+            connection.execute(
+                "UPDATE materials SET status=?, updated_at=?, payload=? WHERE id=?",
+                (
+                    material.status,
+                    material.updated_at.isoformat(),
+                    material.model_dump_json(),
+                    str(material.id),
+                ),
+            )
+        return material
+
+    def transition(
+        self,
+        material: Material,
+        status: MaterialStatus,
+        *,
+        parser: str | None = None,
+        parsed_document_id: str | None = None,
+    ) -> Material:
+        material.status = status
+        if parser is not None:
+            material.parser = parser
+        if parsed_document_id is not None:
+            material.parsed_document_id = parsed_document_id
+        return self.save(material)
+
+    def get(self, material_id: UUID) -> Material | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM materials WHERE id=?", (str(material_id),)
+            ).fetchone()
+        return Material.model_validate_json(row["payload"]) if row else None
+
+    def list(self, course_id: str | None = None) -> list[Material]:
+        with self.workspace.connect() as connection:
+            if course_id is None:
+                rows = connection.execute(
+                    "SELECT payload FROM materials ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT payload FROM materials WHERE course_id=? ORDER BY created_at DESC",
+                    (course_id,),
+                ).fetchall()
+        return [Material.model_validate_json(row["payload"]) for row in rows]
 
 
 class LocalKnowledgeBackend:
@@ -668,6 +747,21 @@ CREATE TABLE IF NOT EXISTS documents (
     source_path TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS materials (
+    id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS materials_course_id_idx ON materials(course_id);
+CREATE INDEX IF NOT EXISTS materials_sha256_idx ON materials(sha256);
 CREATE TABLE IF NOT EXISTS knowledge_points (
     id TEXT PRIMARY KEY,
     course_id TEXT NOT NULL,

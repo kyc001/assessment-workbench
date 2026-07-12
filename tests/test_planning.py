@@ -7,6 +7,7 @@ from assessment_workbench.planning import QuestionSpecWorkflow
 from assessment_workbench.storage import (
     ArtifactStore,
     LocalKnowledgeBackend,
+    MaterialStore,
     RunStore,
     Workspace,
 )
@@ -19,9 +20,9 @@ async def test_plans_question_spec_from_topic(tmp_path: Path) -> None:
     artifacts = ArtifactStore(workspace)
     runs = RunStore(workspace)
     source = Path(__file__).parent / "fixtures" / "sample_course.json"
-    await MaterialIngestionWorkflow(FixtureParser(), knowledge, artifacts, runs).execute(
-        source, "demo-physics", MaterialKind.LECTURE
-    )
+    await MaterialIngestionWorkflow(
+        FixtureParser(), knowledge, artifacts, runs, MaterialStore(workspace)
+    ).execute(source, "demo-physics", MaterialKind.LECTURE)
 
     run, state = await QuestionSpecWorkflow(knowledge, artifacts, runs).execute(
         course_id="demo-physics",

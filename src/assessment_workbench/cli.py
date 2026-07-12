@@ -15,6 +15,7 @@ from assessment_workbench.ports import DocumentParser
 from assessment_workbench.storage import (
     ArtifactStore,
     LocalKnowledgeBackend,
+    MaterialStore,
     RunStore,
     Workspace,
 )
@@ -58,6 +59,9 @@ def ingest_material(
     semantic: Annotated[
         bool, typer.Option(help="Extract semantic course entities with the configured LLM")
     ] = False,
+    semester: Annotated[str | None, typer.Option()] = None,
+    year: Annotated[int | None, typer.Option(min=1900, max=9999)] = None,
+    language: Annotated[str, typer.Option()] = "zh-CN",
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     workspace = _workspace(workspace_path)
@@ -89,15 +93,51 @@ def ingest_material(
         knowledge,
         ArtifactStore(workspace),
         RunStore(workspace),
+        MaterialStore(workspace),
         model,
     )
-    run, state = asyncio.run(workflow.execute(source, course, kind))
+    run, state = asyncio.run(
+        workflow.execute(
+            source,
+            course,
+            kind,
+            semester=semester,
+            year=year,
+            language=language,
+        )
+    )
     typer.echo(f"Run: {run.id}")
     typer.echo(f"Status: {run.status}")
     if run.error:
         typer.echo(f"Error: {run.error}", err=True)
         raise typer.Exit(1)
     typer.echo(f"Knowledge points: {len(state['points'])}")
+
+
+@materials_app.command("list")
+def list_materials(
+    course: Annotated[str | None, typer.Option()] = None,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    materials = MaterialStore(_workspace(workspace_path)).list(course)
+    typer.echo("ID\tCOURSE\tKIND\tSTATUS\tNAME\tMIME\tSIZE")
+    for material in materials:
+        typer.echo(
+            f"{material.id}\t{material.course_id}\t{material.kind}\t{material.status}\t"
+            f"{material.original_name}\t{material.mime_type}\t{material.size_bytes}"
+        )
+
+
+@materials_app.command("show")
+def show_material(
+    material_id: UUID,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    material = MaterialStore(_workspace(workspace_path)).get(material_id)
+    if material is None:
+        typer.echo(f"Material not found: {material_id}", err=True)
+        raise typer.Exit(1)
+    typer.echo(material.model_dump_json(indent=2))
 
 
 @topics_app.command("list")

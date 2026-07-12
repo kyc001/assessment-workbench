@@ -1,3 +1,5 @@
+import hashlib
+import mimetypes
 import re
 from pathlib import Path
 from typing import Any
@@ -7,14 +9,21 @@ from assessment_workbench.domain import (
     KnowledgeExtraction,
     KnowledgePoint,
     KnowledgeRelation,
+    Material,
     MaterialKind,
+    MaterialStatus,
     ParsedDocument,
     RelationKind,
     SourceReference,
     WorkflowRun,
 )
 from assessment_workbench.ports import DocumentParser, StructuredModel
-from assessment_workbench.storage import ArtifactStore, LocalKnowledgeBackend, RunStore
+from assessment_workbench.storage import (
+    ArtifactStore,
+    LocalKnowledgeBackend,
+    MaterialStore,
+    RunStore,
+)
 from assessment_workbench.workflow import WorkflowEngine
 
 
@@ -25,18 +34,38 @@ class MaterialIngestionWorkflow:
         knowledge: LocalKnowledgeBackend,
         artifacts: ArtifactStore,
         runs: RunStore,
+        materials: MaterialStore,
         model: StructuredModel | None = None,
     ) -> None:
         self.parser = parser
         self.knowledge = knowledge
         self.artifacts = artifacts
         self.engine = WorkflowEngine(runs)
+        self.materials = materials
         self.model = model
 
     async def execute(
-        self, source: Path, course_id: str, kind: MaterialKind
+        self,
+        source: Path,
+        course_id: str,
+        kind: MaterialKind,
+        *,
+        semester: str | None = None,
+        year: int | None = None,
+        language: str = "zh-CN",
     ) -> tuple[WorkflowRun, dict[str, Any]]:
+        material = build_material(
+            source,
+            course_id,
+            kind,
+            semester=semester,
+            year=year,
+            language=language,
+        )
+        self.materials.create(material)
+
         async def parse(_: dict[str, Any]) -> dict[str, Any]:
+            self.materials.transition(material, MaterialStatus.PROCESSING, parser=self.parser.name)
             return {"document": await self.parser.parse(source)}
 
         async def extract(state: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +108,12 @@ class MaterialIngestionWorkflow:
                 },
                 created_by_phase="PERSISTING",
             )
+            self.materials.transition(
+                material,
+                MaterialStatus.READY,
+                parser=self.parser.name,
+                parsed_document_id=document.id,
+            )
             return {
                 "output_artifact_ids": [document_artifact.id, graph_artifact.id],
                 "artifacts": [document_artifact, graph_artifact],
@@ -91,9 +126,43 @@ class MaterialIngestionWorkflow:
                 ("KNOWLEDGE_EXTRACTING", extract),
                 ("PERSISTING", persist),
             ],
-            {"course_id": course_id, "kind": kind.value},
+            {
+                "course_id": course_id,
+                "kind": kind.value,
+                "material_id": str(material.id),
+            },
         )
+        if run.status == "failed":
+            self.materials.transition(material, MaterialStatus.FAILED, parser=self.parser.name)
         return run, state
+
+
+def build_material(
+    source: Path,
+    course_id: str,
+    kind: MaterialKind,
+    *,
+    semester: str | None = None,
+    year: int | None = None,
+    language: str = "zh-CN",
+) -> Material:
+    resolved = source.resolve()
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return Material(
+        course_id=course_id,
+        kind=kind,
+        source_path=resolved,
+        original_name=resolved.name,
+        sha256=digest.hexdigest(),
+        mime_type=mimetypes.guess_type(resolved.name)[0] or "application/octet-stream",
+        size_bytes=resolved.stat().st_size,
+        semester=semester,
+        year=year,
+        language=language,
+    )
 
 
 def extract_heading_graph(

@@ -6,6 +6,7 @@ from assessment_workbench.parsers import FixtureParser
 from assessment_workbench.storage import (
     ArtifactStore,
     LocalKnowledgeBackend,
+    MaterialStore,
     RunStore,
     Workspace,
 )
@@ -16,7 +17,9 @@ async def test_ingestion_persists_graph_and_paired_events(tmp_path: Path) -> Non
     workspace.initialize()
     runs = RunStore(workspace)
     knowledge = LocalKnowledgeBackend(workspace)
-    workflow = MaterialIngestionWorkflow(FixtureParser(), knowledge, ArtifactStore(workspace), runs)
+    workflow = MaterialIngestionWorkflow(
+        FixtureParser(), knowledge, ArtifactStore(workspace), runs, MaterialStore(workspace)
+    )
     source = Path(__file__).parent / "fixtures" / "sample_course.json"
 
     run, state = await workflow.execute(source, "demo-physics", MaterialKind.LECTURE)
@@ -43,3 +46,8 @@ async def test_ingestion_persists_graph_and_paired_events(tmp_path: Path) -> Non
     ]
     assert all(ArtifactStore(workspace).verify(artifact.id) for artifact in artifacts)
     assert events[-1].output_artifact_ids
+    materials = MaterialStore(workspace).list("demo-physics")
+    assert len(materials) == 1
+    assert materials[0].status == "ready"
+    assert materials[0].mime_type == "application/json"
+    assert materials[0].parsed_document_id == "doc-demo-physics-01"

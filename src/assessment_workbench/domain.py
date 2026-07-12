@@ -20,6 +20,33 @@ class MaterialKind(StrEnum):
     OTHER = "other"
 
 
+class MaterialStatus(StrEnum):
+    REGISTERED = "registered"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+    DELETED = "deleted"
+
+
+class Material(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    course_id: str
+    kind: MaterialKind
+    source_path: Path
+    original_name: str
+    sha256: str = Field(min_length=64, max_length=64)
+    mime_type: str
+    size_bytes: int = Field(ge=0)
+    semester: str | None = None
+    year: int | None = Field(default=None, ge=1900, le=9999)
+    language: str = "zh-CN"
+    status: MaterialStatus = MaterialStatus.REGISTERED
+    parser: str | None = None
+    parsed_document_id: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
 class BlockKind(StrEnum):
     TEXT = "text"
     EQUATION = "equation"
