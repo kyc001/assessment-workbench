@@ -1,3 +1,4 @@
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID, uuid4
@@ -33,6 +34,7 @@ class WorkflowEngine:
         state = dict(context or {})
         state["run_id"] = run.id
         self.store.transition(run, RunStatus.RUNNING)
+        self.store.claim(run, os.getpid())
         return await self._execute_steps(run, steps, state, 0, parent_run_id, parent_event_id)
 
     async def resume(
@@ -57,6 +59,7 @@ class WorkflowEngine:
         state: dict[str, Any] = dict(checkpoint.context)
         state["run_id"] = run.id
         self.store.transition(run, RunStatus.RUNNING)
+        self.store.claim(run, os.getpid())
         return await self._execute_steps(
             run,
             steps,
@@ -154,12 +157,15 @@ class WorkflowEngine:
                     return run, state
         except (KeyboardInterrupt, SystemExit):
             self.store.transition(run, RunStatus.INTERRUPTED)
+            self.store.release(run)
             return run, state
         except Exception as exc:
             self.store.transition(run, RunStatus.FAILED, error=str(exc))
+            self.store.release(run)
             return run, state
 
         self.store.transition(run, RunStatus.SUCCEEDED, current_phase="DONE")
+        self.store.release(run)
         self.store.clear_checkpoint(run.id)
         return run, state
 

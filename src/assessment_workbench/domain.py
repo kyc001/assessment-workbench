@@ -211,7 +211,7 @@ ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
             RunStatus.FAILED,
         }
     ),
-    RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.FAILED}),
+    RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.INTERRUPTED}),
     RunStatus.INTERRUPTED: frozenset(
         {RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED, RunStatus.FAILED}
     ),
@@ -240,6 +240,8 @@ class WorkflowRun(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
     error: str | None = None
+    runner_host: str | None = None
+    runner_pid: int | None = Field(default=None, ge=1)
 
 
 class WorkflowCheckpoint(BaseModel):

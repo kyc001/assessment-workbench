@@ -1,3 +1,4 @@
+import socket
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -161,3 +162,39 @@ async def test_human_rejection_fails_run(tmp_path: Path) -> None:
 
     assert resolved.status is RunStatus.FAILED
     assert resolved.error == "incorrect"
+
+
+def test_orphaned_local_runner_becomes_interrupted(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    run = store.create("orphan")
+    store.transition(run, RunStatus.RUNNING)
+    run.runner_host = socket.gethostname()
+    run.runner_pid = 2147483647
+    store.save(run)
+
+    recovered = store.recover_orphaned()
+
+    assert [item.id for item in recovered] == [run.id]
+    stored = store.get(run.id)
+    assert stored is not None
+    assert stored.status is RunStatus.INTERRUPTED
+    assert stored.runner_host is None
+    assert stored.runner_pid is None
+
+
+def test_live_runner_is_not_recovered(tmp_path: Path) -> None:
+    import os
+
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    run = store.create("live")
+    store.transition(run, RunStatus.RUNNING)
+    store.claim(run, os.getpid())
+
+    assert store.recover_orphaned() == []
+    stored = store.get(run.id)
+    assert stored is not None
+    assert stored.status is RunStatus.RUNNING

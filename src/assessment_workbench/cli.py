@@ -38,6 +38,7 @@ def _workspace(path: Path | None) -> Workspace:
     root = path or Settings().workspace
     workspace = Workspace(root)
     workspace.require_initialized()
+    RunStore(workspace).recover_orphaned()
     return workspace
 
 

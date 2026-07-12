@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -40,6 +41,7 @@ class Workspace:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
             _migrate_phase_events(connection)
+            _migrate_runs(connection)
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -60,7 +62,10 @@ class RunStore:
         run = WorkflowRun(workflow=workflow)
         with self.workspace.connect() as connection:
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO runs
+                (id, workflow, status, current_phase, created_at, updated_at, error,
+                 runner_host, runner_pid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 _run_values(run),
             )
         return run
@@ -69,8 +74,17 @@ class RunStore:
         run.updated_at = now_utc()
         with self.workspace.connect() as connection:
             connection.execute(
-                """UPDATE runs SET status=?, current_phase=?, updated_at=?, error=? WHERE id=?""",
-                (run.status, run.current_phase, run.updated_at.isoformat(), run.error, str(run.id)),
+                """UPDATE runs SET status=?, current_phase=?, updated_at=?, error=?,
+                runner_host=?, runner_pid=? WHERE id=?""",
+                (
+                    run.status,
+                    run.current_phase,
+                    run.updated_at.isoformat(),
+                    run.error,
+                    run.runner_host,
+                    run.runner_pid,
+                    str(run.id),
+                ),
             )
 
     def transition(
@@ -96,6 +110,33 @@ class RunStore:
         if run.status is RunStatus.QUEUED:
             return self.transition(run, RunStatus.CANCELLED)
         return self.transition(run, RunStatus.CANCELLING)
+
+    def claim(self, run: WorkflowRun, pid: int) -> WorkflowRun:
+        run.runner_host = socket.gethostname()
+        run.runner_pid = pid
+        self.save(run)
+        return run
+
+    def release(self, run: WorkflowRun) -> WorkflowRun:
+        run.runner_host = None
+        run.runner_pid = None
+        self.save(run)
+        return run
+
+    def recover_orphaned(self, *, host: str | None = None) -> list[WorkflowRun]:
+        current_host = host or socket.gethostname()
+        recovered: list[WorkflowRun] = []
+        for run in self.list_runs():
+            if run.status not in {RunStatus.RUNNING, RunStatus.CANCELLING}:
+                continue
+            if run.runner_host != current_host or run.runner_pid is None:
+                continue
+            if _pid_exists(run.runner_pid):
+                continue
+            self.transition(run, RunStatus.INTERRUPTED, error="runner process no longer exists")
+            self.release(run)
+            recovered.append(run)
+        return recovered
 
     def save_checkpoint(self, checkpoint: WorkflowCheckpoint) -> None:
         with self.workspace.connect() as connection:
@@ -497,7 +538,9 @@ def _versioned_name(logical_name: str, version: int) -> str:
     return f"{stem}.v{version}{suffix}"
 
 
-def _run_values(run: WorkflowRun) -> tuple[str, str, str, str | None, str, str, str | None]:
+def _run_values(
+    run: WorkflowRun,
+) -> tuple[str, str, str, str | None, str, str, str | None, str | None, int | None]:
     return (
         str(run.id),
         run.workflow,
@@ -506,6 +549,8 @@ def _run_values(run: WorkflowRun) -> tuple[str, str, str, str | None, str, str, 
         run.created_at.isoformat(),
         run.updated_at.isoformat(),
         run.error,
+        run.runner_host,
+        run.runner_pid,
     )
 
 
@@ -541,6 +586,24 @@ def _migrate_phase_events(connection: sqlite3.Connection) -> None:
             connection.execute(f"ALTER TABLE phase_events ADD COLUMN {name} {definition}")
 
 
+def _migrate_runs(connection: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+    columns = {"runner_host": "TEXT", "runner_pid": "INTEGER"}
+    for name, definition in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+
+
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _merge_point(existing: KnowledgePoint, incoming: KnowledgePoint) -> KnowledgePoint:
     evidence = {f"{item.document_id}:{item.block_id}": item for item in existing.evidence}
     evidence.update({f"{item.document_id}:{item.block_id}": item for item in incoming.evidence})
@@ -571,7 +634,9 @@ CREATE TABLE IF NOT EXISTS runs (
     current_phase TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    runner_host TEXT,
+    runner_pid INTEGER
 );
 CREATE TABLE IF NOT EXISTS phase_events (
     id TEXT PRIMARY KEY,
