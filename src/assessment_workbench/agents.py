@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
+from assessment_workbench.compilers import TectonicCompiler
 from assessment_workbench.domain import (
     ArbitrationAction,
     ArbitrationDecision,
@@ -27,6 +28,7 @@ from assessment_workbench.domain import (
     SubjectProfileCandidate,
     WorkflowRun,
 )
+from assessment_workbench.latex import ExamView, GenericLatexRenderer
 from assessment_workbench.ports import StructuredModel
 from assessment_workbench.storage import ArtifactStore, RunStore
 from assessment_workbench.workflow import WorkflowEngine
@@ -50,11 +52,13 @@ class ExamAgentWorkflow:
         runs: RunStore,
         *,
         max_question_attempts: int = 3,
+        compiler: TectonicCompiler | None = None,
     ) -> None:
         self.models = models
         self.artifacts = artifacts
         self.engine = WorkflowEngine(runs)
         self.max_question_attempts = max_question_attempts
+        self.compiler = compiler
 
     async def execute(
         self,
@@ -122,9 +126,9 @@ class ExamAgentWorkflow:
                 prompt_version="exam-blueprint-v1",
                 run_id=str(state["run_id"]),
             )
-            unsupported = {
-                section.question_type for section in draft.sections
-            } - set(profile.supported_question_types)
+            unsupported = {section.question_type for section in draft.sections} - set(
+                profile.supported_question_types
+            )
             if unsupported:
                 names = sorted(item.value for item in unsupported)
                 raise ValueError(f"blueprint uses unsupported question types: {names}")
@@ -189,6 +193,43 @@ class ExamAgentWorkflow:
             )
             return {"exam": exam, "artifacts": [artifact], "output_artifact_ids": [artifact.id]}
 
+        async def export(state: dict[str, Any]) -> dict[str, Any]:
+            exam: ExamDocument = state["exam"]
+            renderer = GenericLatexRenderer()
+            outputs = list(state["artifacts"])
+            for view in ExamView:
+                source = renderer.render(exam, view)
+                outputs.append(
+                    self.artifacts.write_bytes(
+                        state["run_id"],
+                        f"exam-{view.value}.tex",
+                        source.encode("utf-8"),
+                        media_type="application/x-tex",
+                        created_by_phase="LATEX_FORMATTING",
+                    )
+                )
+                if self.compiler is not None:
+                    result = self.compiler.compile(source, job_name=f"exam-{view.value}")
+                    outputs.append(
+                        self.artifacts.write_bytes(
+                            state["run_id"],
+                            f"exam-{view.value}.pdf",
+                            result.pdf,
+                            media_type="application/pdf",
+                            created_by_phase="PDF_COMPILING",
+                        )
+                    )
+                    outputs.append(
+                        self.artifacts.write_bytes(
+                            state["run_id"],
+                            f"exam-{view.value}.tectonic.log",
+                            result.log.encode("utf-8"),
+                            media_type="text/plain",
+                            created_by_phase="PDF_COMPILING",
+                        )
+                    )
+            return {"artifacts": outputs, "output_artifact_ids": [item.id for item in outputs]}
+
         return await self.engine.execute(
             "exam_agent_generation",
             [
@@ -196,6 +237,7 @@ class ExamAgentWorkflow:
                 ("EXAM_PLANNING", plan_exam),
                 ("QUESTIONS_GENERATING", generate_questions),
                 ("EXAM_ASSEMBLING", assemble),
+                ("LATEX_FORMATTING", export),
             ],
         )
 

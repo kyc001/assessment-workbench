@@ -6,6 +6,7 @@ from uuid import UUID
 import typer
 
 from assessment_workbench.agents import ExamAgentWorkflow, ModelRouter
+from assessment_workbench.compilers import TectonicCompiler
 from assessment_workbench.config import Settings
 from assessment_workbench.domain import HumanDecision, HumanDecisionType, MaterialKind, QuestionType
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
@@ -363,6 +364,10 @@ def generate_exam(
         ModelRouter(standard=standard, strong=strong),
         ArtifactStore(workspace),
         RunStore(workspace),
+        compiler=TectonicCompiler(
+            settings.tectonic_command,
+            timeout_seconds=settings.tectonic_timeout,
+        ),
     )
     run, state = asyncio.run(
         workflow.execute(

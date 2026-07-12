@@ -15,3 +15,5 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
     llm_strong_model: str = "gpt-4.1"
+    tectonic_command: str = "tectonic"
+    tectonic_timeout: float = 120.0
