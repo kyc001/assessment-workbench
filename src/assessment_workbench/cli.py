@@ -6,7 +6,6 @@ from uuid import UUID
 import typer
 
 from assessment_workbench.config import Settings
-from assessment_workbench.demo_exam import GaokaoMathDemoWorkflow
 from assessment_workbench.domain import HumanDecision, HumanDecisionType, MaterialKind, QuestionType
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
 from assessment_workbench.models import OpenAICompatibleModel
@@ -327,24 +326,3 @@ def abort_run(
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     _resolve_human(run_id, HumanDecisionType.ABORT, actor, reason, workspace_path)
-
-
-@exams_app.command("demo-gaokao-math")
-def generate_gaokao_math_demo(
-    blueprint: Annotated[Path, typer.Option()] = Path("examples/gaokao-mathematics/blueprint.yaml"),
-    questions: Annotated[Path, typer.Option()] = Path("examples/gaokao-mathematics/questions.yaml"),
-    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
-) -> None:
-    workspace = _workspace(workspace_path)
-    workflow = GaokaoMathDemoWorkflow(ArtifactStore(workspace), RunStore(workspace))
-    run, state = asyncio.run(workflow.execute(blueprint, questions))
-    typer.echo(f"Run: {run.id}")
-    typer.echo(f"Status: {run.status}")
-    if run.error:
-        typer.echo(f"Error: {run.error}", err=True)
-        raise typer.Exit(1)
-    exam = state["exam"]
-    typer.echo(f"Questions: {len(exam.questions)}")
-    typer.echo(f"Total score: {exam.total_score}")
-    for artifact in state["artifacts"]:
-        typer.echo(f"Artifact: {workspace.root / artifact.path}")

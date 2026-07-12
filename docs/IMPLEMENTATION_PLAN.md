@@ -27,16 +27,14 @@
 
 部分实现但尚未达到完成定义：
 
-- `WAITING_HUMAN` 只有状态枚举，没有暂停、决策和恢复协议。
-- 阶段事件已有 `round/occurrence_id/entity_id`，但缺少父事件和输入/输出产物关联。
+- 材料和知识工作流已接入持久化内核，业务工作流仍需逐项接入恢复入口。
 - 材料状态机只有解析、知识抽取、持久化三阶段，尚未覆盖分类、质量审核和异常路由。
 - 知识图谱存在关系 Schema，但缺少同义实体仲裁、人工修订和向量召回。
 - `QuestionSpec` 已完成，但尚未生成题干、答案和评分细则。
-- README 之前称“可恢复”，当前只有持久记录，尚不能从检查点继续执行。
 
 未实现：
 
-- Subject Profile、多科目工具和 Reviewer 配置。
+- 动态 Subject Profile 研究、多科目工具和 Reviewer 注册校验。
 - 单题生成、独立解答、Rubric、审核、仲裁与分类重试。
 - 整卷蓝图、子工作流、整卷审核和人工确认。
 - 统一 `ExamDocument`、LaTeX Renderer、编译和模板修复。
@@ -265,7 +263,7 @@ uv run assessment-workbench --help
 - [x] 定义 `SubjectProfile` Pydantic Schema。
 - [x] 支持题型、Reviewer、工具、LaTeX 模板和难度维度配置。
 - [ ] 提供 `physics.yaml`。
-- [x] 提供首个 `gaokao-mathematics.yaml` 数学 Profile。
+- [x] 提供首个 `gaokao-mathematics.yaml` 数学 Profile 示例；运行时动态研究尚未实现。
 - [ ] 加载时校验 Reviewer 和工具是否已注册。
 - [ ] 定义 `SubjectTool` 协议。
 - [ ] 接入 SymPy 符号验证。
@@ -357,7 +355,7 @@ uv run assessment-workbench --help
 - [x] 定义 `ExamBlueprint`、Section、Coverage、DifficultyDistribution。
 - [x] 校验总分、各区分值、覆盖分值和题量。
 - [ ] 支持目标年级、考试时长、语言和材料范围。
-- [ ] 支持用户 YAML 规格和 Agent 规划两种来源。
+- [ ] 支持用户 YAML 约束和 Agent 动态规划两种来源；示例 YAML 不得包含预设题目。
 
 ## M6.2 蓝图状态机
 
@@ -396,7 +394,7 @@ uv run assessment-workbench --help
 - [ ] 单题失败不重做整卷。
 - [ ] `QUESTIONS_GENERATING/SOLVING/RUBRICS_BUILDING`。
 - [ ] `QUESTIONS_REVIEWING/ARBITRATING`。
-- [x] `EXAM_ASSEMBLING` 首个离线高考数学 Demo 实现。
+- [ ] `EXAM_ASSEMBLING`，只能组装 Agent 生成并审核通过的版本化题目。
 
 ## M6.4 整卷审核和仲裁
 
@@ -715,7 +713,7 @@ M11 CLI 和 M12 评测/安全贯穿 M1-M10
 
 # 下一执行批次
 
-当前下一批必须先补齐 M1，而不是直接继续堆 Agent：
+M1 内核批次已完成。当前下一批实现真实 Agent 闭环，不使用静态题目 fixture：
 
 - [x] M1-A：扩展 PhaseEvent 的 workflow、parent run/event、input/output artifact 字段。
 - [x] M1-B：建立 Artifact 表、原子写入和完整性校验。
@@ -725,4 +723,8 @@ M11 CLI 和 M12 评测/安全贯穿 M1-M10
 - [x] M1-F：实现 runner host/PID 所有权和进程启动时的 orphan run 恢复策略。
 - [x] M1-G：补齐失败、取消、恢复、父子 run、artifact 和人工等待综合测试。
 
-完成这一批后，才能把材料工作流扩展为完整的分类、解析、审核和异常路由状态机。
+- [ ] A1：动态 Subject Research Agent 生成 Subject Profile 候选和来源说明。
+- [ ] A2：Exam Blueprint Agent 根据用户约束和材料生成结构化蓝图。
+- [ ] A3：Question Writer、Independent Solver 和 Rubric Builder 逐题生成版本化产物。
+- [ ] A4：Reviewer Pool、Arbiter 和分类重试形成有界闭环。
+- [ ] A5：从审核通过的领域对象生成 LaTeX，并由 Tectonic 编译 PDF。
