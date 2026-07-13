@@ -98,7 +98,10 @@ uv run assessment-workbench materials ingest lecture.pdf \
 ```text
 AW_LLM_BASE_URL=https://api.openai.com/v1
 AW_LLM_API_KEY=...
-AW_LLM_MODEL=gpt-4.1-mini
+AW_LLM_MODEL=gpt-5.6-luna
+AW_LLM_STRONG_MODEL=gpt-5.6-luna
+AW_LLM_REQUEST_CONCURRENCY=6
+AW_EXAM_QUESTION_CONCURRENCY=3
 ```
 
 抽取结果必须引用 MinerU 内容块 ID；没有证据的节点和关系不会入库。

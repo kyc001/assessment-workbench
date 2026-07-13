@@ -23,12 +23,16 @@ class OpenAICompatibleModel:
         model: str,
         audit_store: ModelAuditStore,
         timeout: float = 300,
+        max_concurrency: int = 6,
     ) -> None:
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.audit_store = audit_store
         self.timeout = timeout
+        self._request_semaphore = asyncio.Semaphore(max_concurrency)
 
     async def complete(
         self,
@@ -105,7 +109,10 @@ class OpenAICompatibleModel:
             raise
 
     async def _post(self, request: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with (
+            self._request_semaphore,
+            httpx.AsyncClient(timeout=self.timeout) as client,
+        ):
             for attempt in range(3):
                 try:
                     response = await client.post(

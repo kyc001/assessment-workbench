@@ -4,20 +4,20 @@ version: "1"
 supported_question_types:
   - multiple_choice
   - fill_blank
+  - constructed_response
   - calculation
   - proof
 reviewers:
-  - mathematical_correctness
+  - mathematical
+  - subject
   - solvability
-  - proof_completeness
-  - rubric_quality
-  - pedagogical_quality
-  - structural
-  - similarity
+  - rubric
+  - pedagogical
+  - structure
 tools:
   - sympy
   - numerical_sampler
-latex_template: templates/gaokao-mathematics
+latex_template: generic-v1
 difficulty_dimensions:
   - conceptual
   - reasoning

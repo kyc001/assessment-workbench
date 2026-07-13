@@ -46,9 +46,10 @@ class Workspace:
             _migrate_runs(connection)
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
     def require_initialized(self) -> None:
@@ -537,6 +538,31 @@ class ArtifactStore:
         )
         self._save(artifact)
         return artifact
+
+    def write_editable_json(
+        self,
+        parent_run_id: UUID,
+        relative_name: str,
+        payload: object,
+    ) -> Path:
+        root = (self.workspace.root / "editable" / str(parent_run_id)).resolve()
+        destination = (root / relative_name).resolve()
+        if root != destination and root not in destination.parents:
+            raise ValueError("editable path escapes the parent run directory")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n"
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".editable-", dir=destination.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(serialized)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, destination)
+        except Exception:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+            raise
+        return destination.relative_to(self.workspace.root)
 
     def list(self, run_id: UUID) -> list[ArtifactRef]:
         with self.workspace.connect() as connection:

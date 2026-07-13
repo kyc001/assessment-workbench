@@ -15,6 +15,7 @@ from assessment_workbench.domain import (
 from assessment_workbench.storage import RunStore
 
 Step = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+RunCreatedCallback = Callable[[WorkflowRun], None]
 
 
 class WorkflowEngine:
@@ -29,8 +30,11 @@ class WorkflowEngine:
         *,
         parent_run_id: UUID | None = None,
         parent_event_id: UUID | None = None,
+        on_run_created: RunCreatedCallback | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         run = self.store.create(workflow)
+        if on_run_created is not None:
+            on_run_created(run)
         state = dict(context or {})
         state["run_id"] = run.id
         self.store.transition(run, RunStatus.RUNNING)

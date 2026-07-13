@@ -3,8 +3,10 @@ from uuid import uuid4
 
 import pytest
 
-from assessment_workbench.compilers import TectonicCompiler
+from assessment_workbench.compilers import LatexCompileError, TectonicCompiler, validate_latex_log
 from assessment_workbench.domain import (
+    ExamContentBlock,
+    ExamContentKind,
     ExamDocument,
     ExamQuestionBundle,
     GenerationMetadata,
@@ -15,7 +17,18 @@ from assessment_workbench.domain import (
     SolutionStep,
     SolutionVersion,
 )
-from assessment_workbench.latex import ExamView, GenericLatexRenderer, escape_latex, validate_math
+from assessment_workbench.latex import (
+    ExamView,
+    GenericLatexRenderer,
+    escape_latex,
+    render_content,
+    validate_math,
+)
+from assessment_workbench.latex_service import (
+    ExamLatexService,
+    LatexTemplateError,
+    validate_exam_latex,
+)
 
 
 def build_exam() -> ExamDocument:
@@ -66,10 +79,11 @@ def test_renderer_separates_views_and_escapes_text() -> None:
     solutions = renderer.render(exam, ExamView.SOLUTIONS)
     rubric = renderer.render(exam, ExamView.RUBRIC)
 
-    assert "Final answer" not in questions
-    assert "Final answer" in solutions
-    assert "Scoring rubric" in rubric
+    assert "最终答案" not in questions
+    assert "最终答案" in solutions
+    assert "评分标准" in rubric
     assert r"x\_1 \& x\_2" in questions
+    assert r"\awquestion{第1题（10分）}" in questions
     assert renderer.render(exam, ExamView.QUESTIONS) == questions
 
 
@@ -77,6 +91,54 @@ def test_latex_safety_checks() -> None:
     assert escape_latex("50%") == r"50\%"
     with pytest.raises(ValueError, match="unsafe"):
         validate_math(r"\input{secret}")
+    with pytest.raises(ValueError, match="math blocks"):
+        ExamContentBlock(kind=ExamContentKind.TEXT, content="AB⊥平面ABC")
+
+    with pytest.raises(LatexCompileError, match="blocking diagnostic"):
+        validate_latex_log(r"warning: Overfull \vbox (12.0pt too high)")
+
+    with pytest.raises(LatexTemplateError, match="template contract"):
+        validate_exam_latex(r"\documentclass{article}\begin{document}\end{document}")
+
+
+def test_renderer_preserves_structured_mathematics() -> None:
+    exam = build_exam()
+    exam.questions[0].question.statement = [
+        ExamContentBlock(kind=ExamContentKind.TEXT, content="已知 "),
+        ExamContentBlock(kind=ExamContentKind.INLINE_MATH, content=r"x_1+x_2=3"),
+        ExamContentBlock(kind=ExamContentKind.TEXT, content="，求"),
+        ExamContentBlock(kind=ExamContentKind.DISPLAY_MATH, content=r"x_1^2+x_2^2"),
+    ]
+
+    rendered = GenericLatexRenderer().render(exam, ExamView.QUESTIONS)
+
+    assert r"$x_1+x_2=3$" in rendered
+    assert r"\[x_1^2+x_2^2\]" in rendered
+
+
+def test_renderer_keeps_choice_math_inline_and_reserves_question_space() -> None:
+    sentence = [
+        ExamContentBlock(kind=ExamContentKind.TEXT, content="数据为"),
+        ExamContentBlock(kind=ExamContentKind.DISPLAY_MATH, content="x_1=1,x_2=2"),
+        ExamContentBlock(kind=ExamContentKind.TEXT, content="，求平均数"),
+    ]
+    option = [
+        ExamContentBlock(kind=ExamContentKind.DISPLAY_MATH, content=r"\frac{3}{5}"),
+    ]
+
+    assert render_content(sentence) == r"数据为$x_1=1,x_2=2$，求平均数"
+    assert render_content(option, allow_display_math=False) == r"$\frac{3}{5}$"
+
+    exam = build_exam()
+    exam.questions[0].question.question_type = QuestionType.MULTIPLE_CHOICE
+    exam.questions[0].question.options = [option, option]
+    rendered = GenericLatexRenderer().render(exam, ExamView.QUESTIONS)
+    assert r"\newcommand{\awquestion}" in rendered
+    assert r"\item $\frac{3}{5}$" in rendered
+
+    builds = list(ExamLatexService().build(exam))
+    assert [build.view for build in builds] == list(ExamView)
+    assert all(build.compile_result is None for build in builds)
 
 
 def test_tectonic_compiles_document_when_available() -> None:

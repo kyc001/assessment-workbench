@@ -10,3 +10,12 @@ dist/
 build/
 *.egg-info/
 workspaces/
+tmp/
+data/
+.trellis/
+.agents/
+.claude/
+.codex/
+.opencode/
+.vscode/
+AGENTS.md

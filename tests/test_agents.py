@@ -1,3 +1,4 @@
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,13 @@ from assessment_workbench.domain import (
     BlueprintDraft,
     CoverageTarget,
     DifficultyDistribution,
+    ExamBlueprint,
+    ExamPlanningMode,
     ExamSectionBlueprint,
     QuestionDraft,
+    QuestionPart,
+    QuestionPlanDraft,
+    QuestionPlanSetDraft,
     QuestionType,
     ReviewerName,
     ReviewFinding,
@@ -22,6 +28,7 @@ from assessment_workbench.domain import (
     RunStatus,
     SolutionDraft,
     SolutionStep,
+    SubjectProfile,
     SubjectProfileCandidate,
 )
 from assessment_workbench.storage import ArtifactStore, RunStore, Workspace
@@ -65,6 +72,24 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
         ],
         coverage=[CoverageTarget(topic_tag="algebra", target_score=10)],
         difficulty_distribution=DifficultyDistribution(easy=0, medium=1, hard=0),
+    )
+    question_plans = QuestionPlanSetDraft(
+        plans=[
+            QuestionPlanDraft(
+                section_id="calculation",
+                slot=1,
+                topic_tags=["algebra"],
+                primary_skill="Solve a linear equation",
+                design_brief="Use a direct one-variable equation.",
+                difficulty="medium",
+                estimated_minutes=10,
+                answer_form="A single real value",
+                solution_outline=["Isolate the variable"],
+                rubric_focus=["Correct transformation", "Correct result"],
+                verification_methods=["Substitute the result"],
+                originality_constraints=["Do not reuse another slot"],
+            )
+        ]
     )
     question = QuestionDraft(statement="Solve x + 2 = 5.", topic_tags=["algebra"])
     wrong_solution = SolutionDraft(
@@ -112,6 +137,7 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
         {
             "subject_researcher": [profile],
             "exam_blueprint_planner": [blueprint],
+            "question_set_planner": [question_plans],
             "independent_solver": [wrong_solution, correct_solution],
             "question_arbiter": [retry, passed],
         }
@@ -125,7 +151,119 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
     ).execute(subject="mathematics", target_level="Grade 12", requirements="One question")
 
     assert run.status is RunStatus.SUCCEEDED
-    assert state["exam"].questions[0].solution.final_answer == "x = 3"
+    assert state["planning"].mode is ExamPlanningMode.AGENT
+    assert strong.calls["subject_researcher"] == 1
+    assert strong.calls["exam_blueprint_planner"] == 1
+    assert strong.calls["question_set_planner"] == 1
+    assert state["exam"].questions[0].solution.final_answer[0].content == "x = 3"
     assert standard.calls["question_writer"] == 1
     assert strong.calls["independent_solver"] == 2
     assert standard.calls["rubric_builder"] == 2
+
+
+async def test_exam_agents_use_locked_preset_without_replanning(tmp_path: Path) -> None:
+    profile = SubjectProfile(
+        id="preset-mathematics",
+        display_name="Preset Mathematics",
+        supported_question_types=[QuestionType.CONSTRUCTED_RESPONSE],
+        reviewers=["structure"],
+        latex_template="generic-v1",
+        difficulty_dimensions=["reasoning"],
+    )
+    blueprint = ExamBlueprint(
+        id="preset-blueprint",
+        version="2",
+        subject_profile=profile.id,
+        title="Preset assessment",
+        target_level="Grade 12",
+        duration_minutes=30,
+        total_score=10,
+        sections=[
+            ExamSectionBlueprint(
+                id="response",
+                title="Constructed response",
+                question_type=QuestionType.CONSTRUCTED_RESPONSE,
+                count=1,
+                question_scores=[10],
+                topic_tags=["algebra"],
+            )
+        ],
+        coverage=[CoverageTarget(topic_tag="algebra", target_score=10)],
+        difficulty_distribution=DifficultyDistribution(easy=0, medium=1, hard=0),
+    )
+    question_plans = QuestionPlanSetDraft(
+        plans=[
+            QuestionPlanDraft(
+                section_id="response",
+                slot=1,
+                topic_tags=["algebra"],
+                primary_skill="Solve a linear equation",
+                design_brief="Use a direct one-variable equation.",
+                difficulty="medium",
+                estimated_minutes=10,
+                answer_form="A single real value",
+                solution_outline=["Isolate the variable"],
+                rubric_focus=["Correct transformation", "Correct result"],
+                verification_methods=["Substitute the result"],
+                originality_constraints=["Do not reuse another slot"],
+            )
+        ]
+    )
+    question = QuestionDraft(
+        statement="Solve the following equation.",
+        parts=[QuestionPart(id="p1", label="(1)", prompt="Solve x + 2 = 5.", score=10)],
+        topic_tags=["algebra"],
+    )
+    solution = SolutionDraft(
+        steps=[SolutionStep(id="s1", description="Subtract two from both sides")],
+        final_answer="x = 3",
+    )
+    rubric = RubricDraft(items=[RubricItem(id="r1", description="Obtains the answer", score=10)])
+    passed = ArbitrationDecision(action=ArbitrationAction.PASS, rationale="All checks pass.")
+    standard = FixtureModel(
+        {
+            "question_writer": [question],
+            "rubric_builder": [rubric],
+        }
+    )
+    strong = FixtureModel(
+        {
+            "question_set_planner": [question_plans],
+            "independent_solver": [solution],
+            "question_arbiter": [passed],
+        }
+    )
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    artifacts = ArtifactStore(workspace)
+    run, state = await ExamAgentWorkflow(
+        ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
+        artifacts,
+        RunStore(workspace),
+    ).execute(
+        subject="mathematics",
+        target_level="Grade 12",
+        requirements="One question",
+        subject_profile=profile,
+        blueprint=blueprint,
+    )
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert state["planning"].mode is ExamPlanningMode.PRESET
+    assert strong.calls["subject_researcher"] == 0
+    assert strong.calls["exam_blueprint_planner"] == 0
+    assert strong.calls["question_set_planner"] == 1
+    assert state["exam"].questions[0].question.score == 10
+    planning_artifact = next(
+        artifact
+        for artifact in artifacts.list(run.id)
+        if artifact.logical_name == "exam-planning.json"
+    )
+    planning_payload = json.loads(artifacts.read_bytes(planning_artifact.id))
+    assert planning_payload == {
+        "mode": "preset",
+        "subject_profile_id": profile.id,
+        "subject_profile_version": "1",
+        "blueprint_id": blueprint.id,
+        "blueprint_version": "2",
+    }

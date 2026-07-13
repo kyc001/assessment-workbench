@@ -1,6 +1,7 @@
 import asyncio
+import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import typer
@@ -8,12 +9,26 @@ import typer
 from assessment_workbench.agents import ExamAgentWorkflow, ModelRouter
 from assessment_workbench.compilers import TectonicCompiler
 from assessment_workbench.config import Settings
-from assessment_workbench.domain import HumanDecision, HumanDecisionType, MaterialKind, QuestionType
+from assessment_workbench.domain import (
+    ArtifactRef,
+    ExamBlueprint,
+    ExamDocument,
+    ExamQuestionBundle,
+    HumanDecision,
+    HumanDecisionType,
+    MaterialKind,
+    QuestionPlan,
+    QuestionType,
+    RunStatus,
+    SubjectProfile,
+)
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
+from assessment_workbench.latex_service import ExamLatexService
 from assessment_workbench.models import OpenAICompatibleModel
 from assessment_workbench.parsers import FixtureParser, MinerUApiParser, MinerUCliParser
 from assessment_workbench.planning import QuestionSpecWorkflow
 from assessment_workbench.ports import DocumentParser
+from assessment_workbench.profiles import load_exam_blueprint, load_subject_profile
 from assessment_workbench.storage import (
     ArtifactStore,
     LocalKnowledgeBackend,
@@ -21,6 +36,7 @@ from assessment_workbench.storage import (
     RunStore,
     Workspace,
 )
+from assessment_workbench.workflow import WorkflowEngine
 
 app = typer.Typer(help="Course-grounded assessment workflows")
 workspace_app = typer.Typer(help="Initialize and inspect workspaces")
@@ -45,6 +61,60 @@ def _workspace(path: Path | None) -> Workspace:
     workspace.require_initialized()
     RunStore(workspace).recover_orphaned()
     return workspace
+
+
+def _exam_workflow(
+    workspace: Workspace,
+    settings: Settings,
+    *,
+    compile_pdf: bool,
+) -> ExamAgentWorkflow:
+    audit_store = LocalKnowledgeBackend(workspace)
+    standard = OpenAICompatibleModel(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        audit_store=audit_store,
+        timeout=settings.http_timeout,
+        max_concurrency=settings.llm_request_concurrency,
+    )
+    strong = standard
+    if settings.llm_strong_model != settings.llm_model:
+        strong = OpenAICompatibleModel(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_strong_model,
+            audit_store=audit_store,
+            timeout=settings.http_timeout,
+            max_concurrency=settings.llm_request_concurrency,
+        )
+    compiler = None
+    if compile_pdf:
+        compiler = TectonicCompiler(
+            settings.tectonic_command,
+            timeout_seconds=settings.tectonic_timeout,
+        )
+    return ExamAgentWorkflow(
+        ModelRouter(standard=standard, strong=strong),
+        ArtifactStore(workspace),
+        RunStore(workspace),
+        max_parallel_questions=settings.exam_question_concurrency,
+        compiler=compiler,
+    )
+
+
+def _latest_artifact_json(
+    artifacts: ArtifactStore,
+    run_id: UUID,
+    logical_name: str,
+) -> Any:
+    matches = [
+        artifact for artifact in artifacts.list(run_id) if artifact.logical_name == logical_name
+    ]
+    if not matches:
+        raise KeyError(f"artifact not found for run {run_id}: {logical_name}")
+    latest = max(matches, key=lambda artifact: artifact.version)
+    return json.loads(artifacts.read_bytes(latest.id))
 
 
 @workspace_app.command("init")
@@ -339,51 +409,300 @@ def generate_exam(
         Path | None,
         typer.Option(help="Optional UTF-8 source context prepared from course materials"),
     ] = None,
+    subject_profile_path: Annotated[
+        Path | None,
+        typer.Option("--subject-profile", help="Optional locked subject profile YAML"),
+    ] = None,
+    blueprint_path: Annotated[
+        Path | None,
+        typer.Option("--blueprint", help="Optional locked exam blueprint YAML"),
+    ] = None,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
-    workspace = _workspace(workspace_path)
     if source is not None and not source.is_file():
         raise typer.BadParameter(f"source file does not exist: {source}")
+    if (subject_profile_path is None) != (blueprint_path is None):
+        raise typer.BadParameter("--subject-profile and --blueprint must be provided together")
+    subject_profile: SubjectProfile | None = None
+    blueprint: ExamBlueprint | None = None
+    if subject_profile_path is not None and blueprint_path is not None:
+        if not subject_profile_path.is_file():
+            raise typer.BadParameter(f"subject profile file does not exist: {subject_profile_path}")
+        if not blueprint_path.is_file():
+            raise typer.BadParameter(f"blueprint file does not exist: {blueprint_path}")
+        try:
+            subject_profile = load_subject_profile(subject_profile_path)
+            blueprint = load_exam_blueprint(blueprint_path)
+        except (OSError, ValueError) as exc:
+            raise typer.BadParameter(f"invalid exam preset: {exc}") from exc
+
+    workspace = _workspace(workspace_path)
     settings = Settings()
-    audit_store = LocalKnowledgeBackend(workspace)
-    standard = OpenAICompatibleModel(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        audit_store=audit_store,
-        timeout=settings.http_timeout,
-    )
-    strong = OpenAICompatibleModel(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_strong_model,
-        audit_store=audit_store,
-        timeout=settings.http_timeout,
-    )
-    workflow = ExamAgentWorkflow(
-        ModelRouter(standard=standard, strong=strong),
-        ArtifactStore(workspace),
-        RunStore(workspace),
-        compiler=TectonicCompiler(
-            settings.tectonic_command,
-            timeout_seconds=settings.tectonic_timeout,
-        ),
-    )
+    workflow = _exam_workflow(workspace, settings, compile_pdf=True)
     run, state = asyncio.run(
         workflow.execute(
             subject=subject,
             target_level=target_level,
             requirements=requirements,
             source_context=source.read_text(encoding="utf-8") if source else "",
+            subject_profile=subject_profile,
+            blueprint=blueprint,
+            on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
         )
     )
-    typer.echo(f"Run: {run.id}")
     typer.echo(f"Status: {run.status}")
-    if run.error:
-        typer.echo(f"Error: {run.error}", err=True)
+    if run.status is not RunStatus.SUCCEEDED:
+        typer.echo(f"Error: {run.error or 'workflow ended without success'}", err=True)
         raise typer.Exit(1)
     exam = state["exam"]
     typer.echo(f"Questions: {len(exam.questions)}")
     typer.echo(f"Total score: {exam.total_score}")
     for artifact in state["artifacts"]:
+        typer.echo(f"Artifact: {workspace.root / artifact.path}")
+
+
+@exams_app.command("question-status")
+def show_exam_question_status(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    if runs.get(parent_run_id) is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    live_path = workspace.root / "editable" / str(parent_run_id) / "question-runs.json"
+    try:
+        if live_path.is_file():
+            records = json.loads(live_path.read_text(encoding="utf-8"))
+        else:
+            records = _latest_artifact_json(
+                ArtifactStore(workspace), parent_run_id, "question-runs.json"
+            )
+    except (KeyError, OSError, ValueError) as exc:
+        raise typer.BadParameter(f"question run manifest is unavailable: {exc}") from exc
+    if not isinstance(records, list):
+        raise typer.BadParameter("question run manifest is not a list")
+
+    typer.echo("NUMBER\tSTATUS\tCHILD_RUN\tEDITABLE\tERROR")
+    counts: dict[str, int] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        child_id = record.get("run_id")
+        status = str(record.get("status") or "queued")
+        if child_id:
+            try:
+                child_run = runs.get(UUID(str(child_id)))
+            except ValueError:
+                child_run = None
+            if child_run is not None:
+                status = child_run.status.value
+        counts[status] = counts.get(status, 0) + 1
+        editable = record.get("editable_path") or "-"
+        if editable != "-":
+            editable = str(workspace.root / str(editable))
+        error = str(record.get("error") or "").replace("\n", " ")
+        typer.echo(
+            f"{record.get('question_number', '-')}\t{status}\t{child_id or '-'}\t"
+            f"{editable}\t{error}"
+        )
+    summary = ", ".join(f"{key}={counts[key]}" for key in sorted(counts))
+    typer.echo(f"Summary: {summary}")
+
+
+@exams_app.command("generate-question")
+def generate_exam_question(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    number: Annotated[int, typer.Option(min=1)],
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    if runs.get(parent_run_id) is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    artifacts = ArtifactStore(workspace)
+    try:
+        profile = SubjectProfile.model_validate(
+            _latest_artifact_json(artifacts, parent_run_id, "subject-profile.json")
+        )
+        blueprint = ExamBlueprint.model_validate(
+            _latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
+        )
+        plans = [
+            QuestionPlan.model_validate(item)
+            for item in _latest_artifact_json(artifacts, parent_run_id, "question-plans.json")
+        ]
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(f"parent run is missing valid planning artifacts: {exc}") from exc
+    plan = next((item for item in plans if item.number == number), None)
+    if plan is None:
+        raise typer.BadParameter(f"question number is not present in the plan: {number}")
+
+    workflow = _exam_workflow(workspace, Settings(), compile_pdf=False)
+    child_run, state = asyncio.run(
+        workflow.generate_question_run(
+            profile=profile,
+            blueprint=blueprint,
+            plan=plan,
+            parent_run_id=parent_run_id,
+            on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
+        )
+    )
+    typer.echo(f"Status: {child_run.status}")
+    if child_run.status is not RunStatus.SUCCEEDED:
+        typer.echo(f"Error: {child_run.error or 'question generation failed'}", err=True)
+        raise typer.Exit(1)
+
+    bundle = state.get("bundle")
+    bundle_artifact = state.get("bundle_artifact")
+    if not isinstance(bundle, ExamQuestionBundle) or not isinstance(bundle_artifact, ArtifactRef):
+        raise RuntimeError("question child run completed without a bundle artifact")
+    editable_path = artifacts.write_editable_json(
+        parent_run_id,
+        f"questions/{number:02d}.json",
+        bundle.model_dump(mode="json"),
+    )
+    try:
+        records = _latest_artifact_json(artifacts, parent_run_id, "question-runs.json")
+    except KeyError:
+        records = []
+    if not isinstance(records, list):
+        raise RuntimeError("question-runs artifact is not a list")
+    records = [
+        record
+        for record in records
+        if not isinstance(record, dict) or record.get("question_number") != number
+    ]
+    records.append(
+        {
+            "question_number": number,
+            "plan_id": plan.id,
+            "run_id": str(child_run.id),
+            "status": child_run.status,
+            "error": child_run.error,
+            "bundle_artifact_id": str(bundle_artifact.id),
+            "bundle_path": str(bundle_artifact.path),
+            "editable_path": str(editable_path),
+        }
+    )
+    records.sort(
+        key=lambda record: int(record.get("question_number", 0)) if isinstance(record, dict) else 0
+    )
+    artifacts.write_editable_json(parent_run_id, "question-runs.json", records)
+    artifacts.write_json(
+        parent_run_id,
+        "question-runs.json",
+        records,
+        created_by_phase="QUESTION_REGENERATING",
+    )
+    typer.echo(f"Editable: {workspace.root / editable_path}")
+
+
+@exams_app.command("assemble-edited")
+def assemble_edited_exam(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    artifacts = ArtifactStore(workspace)
+    try:
+        blueprint = ExamBlueprint.model_validate(
+            _latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
+        )
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(f"parent run has no valid blueprint: {exc}") from exc
+
+    expected_count = sum(section.count for section in blueprint.sections)
+    question_dir = workspace.root / "editable" / str(parent_run_id) / "questions"
+    paths = [question_dir / f"{number:02d}.json" for number in range(1, expected_count + 1)]
+    missing = [path.name for path in paths if not path.is_file()]
+    if missing:
+        raise typer.BadParameter(f"editable questions are missing: {', '.join(missing)}")
+    try:
+        bundles = [
+            ExamQuestionBundle.model_validate_json(path.read_text(encoding="utf-8"))
+            for path in paths
+        ]
+        exam = ExamDocument(
+            blueprint_id=blueprint.id,
+            title=blueprint.title,
+            subject_profile=blueprint.subject_profile,
+            duration_minutes=blueprint.duration_minutes,
+            total_score=blueprint.total_score,
+            language=blueprint.language,
+            questions=bundles,
+        )
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"editable question validation failed: {exc}") from exc
+
+    async def assemble_step(state: dict[str, Any]) -> dict[str, Any]:
+        run_id = state["run_id"]
+        outputs = [
+            artifacts.write_json(
+                run_id,
+                "exam.json",
+                exam.model_dump(mode="json"),
+                created_by_phase="EDITED_EXAM_ASSEMBLING",
+            )
+        ]
+        settings = Settings()
+        compiler = TectonicCompiler(
+            settings.tectonic_command,
+            timeout_seconds=settings.tectonic_timeout,
+        )
+        latex_service = ExamLatexService(compiler=compiler)
+        for document in latex_service.build(exam):
+            view = document.view
+            source = document.source
+            outputs.append(
+                artifacts.write_bytes(
+                    run_id,
+                    f"exam-{view.value}.tex",
+                    source.encode("utf-8"),
+                    media_type="application/x-tex",
+                    created_by_phase="EDITED_LATEX_FORMATTING",
+                )
+            )
+            assert document.compile_result is not None
+            result = document.compile_result
+            outputs.append(
+                artifacts.write_bytes(
+                    run_id,
+                    f"exam-{view.value}.pdf",
+                    result.pdf,
+                    media_type="application/pdf",
+                    created_by_phase="EDITED_PDF_COMPILING",
+                )
+            )
+            outputs.append(
+                artifacts.write_bytes(
+                    run_id,
+                    f"exam-{view.value}.tectonic.log",
+                    result.log.encode("utf-8"),
+                    media_type="text/plain",
+                    created_by_phase="EDITED_PDF_COMPILING",
+                )
+            )
+        return {
+            "exam": exam,
+            "artifacts": outputs,
+            "output_artifact_ids": [artifact.id for artifact in outputs],
+        }
+
+    assembly_run, state = asyncio.run(
+        WorkflowEngine(RunStore(workspace)).execute(
+            "exam_edited_assembly",
+            [("EDITED_EXAM_ASSEMBLING", assemble_step)],
+            parent_run_id=parent_run_id,
+            on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
+        )
+    )
+    typer.echo(f"Status: {assembly_run.status}")
+    if assembly_run.status is not RunStatus.SUCCEEDED:
+        typer.echo(f"Error: {assembly_run.error or 'edited assembly failed'}", err=True)
+        raise typer.Exit(1)
+    outputs = state["artifacts"]
+    typer.echo(f"Questions: {len(exam.questions)}")
+    typer.echo(f"Total score: {exam.total_score}")
+    for artifact in outputs:
         typer.echo(f"Artifact: {workspace.root / artifact.path}")

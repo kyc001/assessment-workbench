@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from assessment_workbench.domain import ExamBlueprint
+from assessment_workbench.domain import ExamBlueprint, ExamSectionBlueprint, QuestionType
 from assessment_workbench.profiles import load_exam_blueprint, load_subject_profile
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -21,7 +21,10 @@ def test_loads_gaokao_mathematics_profile_and_blueprint() -> None:
     assert blueprint.subject_profile == profile.id
     assert blueprint.total_score == 150
     assert sum(section.total_score for section in blueprint.sections) == 150
-    assert sum(section.count for section in blueprint.sections) == 20
+    assert sum(section.count for section in blueprint.sections) == 19
+    assert [section.count for section in blueprint.sections] == [8, 3, 3, 5]
+    assert blueprint.sections[-1].question_type is QuestionType.CONSTRUCTED_RESPONSE
+    assert blueprint.sections[-1].resolved_scores == [13, 15, 15, 17, 17]
 
 
 def test_blueprint_rejects_score_mismatch() -> None:
@@ -45,4 +48,25 @@ def test_blueprint_rejects_score_mismatch() -> None:
                 ],
                 "difficulty_distribution": {"easy": 0.3, "medium": 0.5, "hard": 0.2},
             }
+        )
+
+
+def test_section_rejects_conflicting_or_mismatched_score_definitions() -> None:
+    with pytest.raises(ValidationError, match="cannot define both"):
+        ExamSectionBlueprint(
+            id="conflicting",
+            title="Conflicting",
+            question_type=QuestionType.CONSTRUCTED_RESPONSE,
+            count=2,
+            score_each=10,
+            question_scores=[10, 10],
+        )
+
+    with pytest.raises(ValidationError, match="length must match"):
+        ExamSectionBlueprint(
+            id="mismatched",
+            title="Mismatched",
+            question_type=QuestionType.CONSTRUCTED_RESPONSE,
+            count=2,
+            question_scores=[20],
         )

@@ -13,7 +13,9 @@ class Settings(BaseSettings):
     http_timeout: float = 300.0
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
-    llm_model: str = "gpt-4.1-mini"
-    llm_strong_model: str = "gpt-4.1"
+    llm_model: str = "gpt-5.6-luna"
+    llm_strong_model: str = "gpt-5.6-luna"
+    llm_request_concurrency: int = 6
+    exam_question_concurrency: int = 3
     tectonic_command: str = "tectonic"
     tectonic_timeout: float = 120.0

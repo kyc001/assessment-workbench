@@ -1,9 +1,10 @@
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def now_utc() -> datetime:
@@ -162,9 +163,81 @@ class RetrievalHit(BaseModel):
 class QuestionType(StrEnum):
     MULTIPLE_CHOICE = "multiple_choice"
     FILL_BLANK = "fill_blank"
+    CONSTRUCTED_RESPONSE = "constructed_response"
     CALCULATION = "calculation"
     PROOF = "proof"
     EXPERIMENT = "experiment"
+
+
+class ExamContentKind(StrEnum):
+    TEXT = "text"
+    INLINE_MATH = "inline_math"
+    DISPLAY_MATH = "display_math"
+
+
+class ExamContentBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ExamContentKind
+    content: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def normalize_math_content(self) -> "ExamContentBlock":
+        if self.kind is ExamContentKind.TEXT:
+            if any(symbol in self.content for symbol in ("∠", "⊥", "∥")):
+                raise ValueError(
+                    "text content must place angle and relation symbols in math blocks"
+                )
+            return self
+        content = self.content.strip()
+        wrappers = ((r"\(", r"\)"), (r"\[", r"\]"))
+        for opening, closing in wrappers:
+            if content.startswith(opening) and content.endswith(closing):
+                content = content[len(opening) : -len(closing)].strip()
+                break
+        if content and set(content) == {"_"}:
+            content = r"\underline{\hspace{2cm}}"
+        content = content.translate(
+            {
+                ord("，"): ",",
+                ord("。"): ".",
+                ord("；"): ";",
+                ord("："): ":",
+            }
+        )
+        forbidden = ("$", r"\(", r"\)", r"\[", r"\]")
+        if any(token in content for token in forbidden):
+            raise ValueError("math content must not include LaTeX math delimiters")
+        self.content = content
+        return self
+
+
+def _normalize_content_blocks(value: object) -> object:
+    if isinstance(value, str):
+        return [{"kind": ExamContentKind.TEXT, "content": value}]
+    if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        return [{"kind": ExamContentKind.TEXT, "content": item} for item in value]
+    return value
+
+
+def _normalize_content_options(value: object) -> object:
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return [[{"kind": ExamContentKind.TEXT, "content": item}] for item in value]
+    return value
+
+
+class QuestionPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    label: str
+    prompt: list[ExamContentBlock] = Field(min_length=1)
+    score: int = Field(ge=1)
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def normalize_prompt(cls, value: object) -> object:
+        return _normalize_content_blocks(value)
 
 
 class SubjectProfile(BaseModel):
@@ -183,12 +256,32 @@ class ExamSectionBlueprint(BaseModel):
     title: str
     question_type: QuestionType
     count: int = Field(ge=1)
-    score_each: int = Field(ge=1)
+    score_each: int | None = Field(default=None, ge=1)
+    question_scores: list[int] = Field(default_factory=list)
     topic_tags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_question_scores(self) -> "ExamSectionBlueprint":
+        if self.score_each is None and not self.question_scores:
+            raise ValueError("section requires score_each or question_scores")
+        if self.score_each is not None and self.question_scores:
+            raise ValueError("section cannot define both score_each and question_scores")
+        if self.question_scores and len(self.question_scores) != self.count:
+            raise ValueError("question_scores length must match section count")
+        if any(score < 1 for score in self.question_scores):
+            raise ValueError("question_scores must contain only positive values")
+        return self
+
+    @property
+    def resolved_scores(self) -> list[int]:
+        if self.question_scores:
+            return list(self.question_scores)
+        assert self.score_each is not None
+        return [self.score_each] * self.count
 
     @property
     def total_score(self) -> int:
-        return self.count * self.score_each
+        return sum(self.resolved_scores)
 
 
 class CoverageTarget(BaseModel):
@@ -210,6 +303,7 @@ class DifficultyDistribution(BaseModel):
 
 class ExamBlueprint(BaseModel):
     id: str
+    version: str = "1"
     subject_profile: str
     title: str
     target_level: str
@@ -233,6 +327,19 @@ class ExamBlueprint(BaseModel):
         if len(section_ids) != len(set(section_ids)):
             raise ValueError("exam section ids must be unique")
         return self
+
+
+class ExamPlanningMode(StrEnum):
+    AGENT = "agent"
+    PRESET = "preset"
+
+
+class ExamPlanningRecord(BaseModel):
+    mode: ExamPlanningMode
+    subject_profile_id: str
+    subject_profile_version: str
+    blueprint_id: str
+    blueprint_version: str
 
 
 class DifficultyProfile(BaseModel):
@@ -259,6 +366,7 @@ class GenerationMetadata(BaseModel):
     model: str = "fixture"
     prompt_version: str = "fixture-v1"
     source_refs: list[SourceReference] = Field(default_factory=list)
+    plan_id: str | None = None
 
 
 class QuestionVersion(BaseModel):
@@ -267,13 +375,26 @@ class QuestionVersion(BaseModel):
     version: int = Field(ge=1)
     parent_version_id: UUID | None = None
     number: int = Field(ge=1)
+    section_id: str = ""
+    section_title: str = ""
     question_type: QuestionType
     topic_tags: list[str] = Field(min_length=1)
     score: int = Field(ge=1)
-    statement: str = Field(min_length=1)
-    options: list[str] = Field(default_factory=list)
+    statement: list[ExamContentBlock] = Field(min_length=1)
+    options: list[list[ExamContentBlock]] = Field(default_factory=list)
+    parts: list[QuestionPart] = Field(default_factory=list)
     answer_format: str = "show_work"
     metadata: GenerationMetadata
+
+    @field_validator("statement", mode="before")
+    @classmethod
+    def normalize_statement(cls, value: object) -> object:
+        return _normalize_content_blocks(value)
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def normalize_options(cls, value: object) -> object:
+        return _normalize_content_options(value)
 
     @model_validator(mode="after")
     def validate_options(self) -> "QuestionVersion":
@@ -281,15 +402,47 @@ class QuestionVersion(BaseModel):
             raise ValueError("multiple-choice questions require at least four options")
         if self.question_type is not QuestionType.MULTIPLE_CHOICE and self.options:
             raise ValueError("only multiple-choice questions may define options")
+        for index, option in enumerate(self.options):
+            if not option or option[0].kind is not ExamContentKind.TEXT:
+                continue
+            label = chr(ord("A") + index)
+            option[0].content = re.sub(
+                rf"^\s*{label}[.\uff0e\u3001:\uff1a]\s*",
+                "",
+                option[0].content,
+            )
+            if not option[0].content:
+                option.pop(0)
+            if not option:
+                raise ValueError("multiple-choice options cannot contain only a label")
+        if self.question_type is QuestionType.CONSTRUCTED_RESPONSE:
+            if not self.parts:
+                raise ValueError("constructed-response questions require explicit parts")
+            if sum(part.score for part in self.parts) != self.score:
+                raise ValueError("question part scores must sum to the question score")
+        elif self.parts:
+            raise ValueError("only constructed-response questions may define parts")
         return self
 
 
 class SolutionStep(BaseModel):
     id: str
-    description: str = Field(min_length=1)
+    description: list[ExamContentBlock] = Field(min_length=1)
     expression: str | None = None
-    conclusion: str | None = None
+    conclusion: list[ExamContentBlock] | None = None
     required: bool = True
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def normalize_description(cls, value: object) -> object:
+        return _normalize_content_blocks(value)
+
+    @field_validator("conclusion", mode="before")
+    @classmethod
+    def normalize_conclusion(cls, value: object) -> object:
+        if value is None:
+            return None
+        return _normalize_content_blocks(value)
 
 
 class SolutionVersion(BaseModel):
@@ -299,10 +452,15 @@ class SolutionVersion(BaseModel):
     version: int = Field(ge=1)
     parent_version_id: UUID | None = None
     steps: list[SolutionStep] = Field(min_length=1)
-    final_answer: str = Field(min_length=1)
+    final_answer: list[ExamContentBlock] = Field(min_length=1)
     alternative_solutions: list[list[SolutionStep]] = Field(default_factory=list)
     verification_notes: list[str] = Field(default_factory=list)
     metadata: GenerationMetadata
+
+    @field_validator("final_answer", mode="before")
+    @classmethod
+    def normalize_final_answer(cls, value: object) -> object:
+        return _normalize_content_blocks(value)
 
 
 class PartialCreditLevel(BaseModel):
@@ -312,12 +470,17 @@ class PartialCreditLevel(BaseModel):
 
 class RubricItem(BaseModel):
     id: str
-    description: str = Field(min_length=1)
+    description: list[ExamContentBlock] = Field(min_length=1)
     score: int = Field(ge=1)
     depends_on: list[str] = Field(default_factory=list)
     equivalent_expressions: list[str] = Field(default_factory=list)
     partial_credit: list[PartialCreditLevel] = Field(default_factory=list)
     carry_forward: bool = False
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def normalize_description(cls, value: object) -> object:
+        return _normalize_content_blocks(value)
 
     @model_validator(mode="after")
     def validate_partial_credit(self) -> "RubricItem":
@@ -379,6 +542,7 @@ class ExamDocument(BaseModel):
     subject_profile: str
     duration_minutes: int = Field(ge=1)
     total_score: int = Field(ge=1)
+    language: str = "zh-CN"
     questions: list[ExamQuestionBundle] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -429,22 +593,87 @@ class BlueprintDraft(StrictModel):
 
 
 class QuestionDraft(StrictModel):
-    statement: str = Field(min_length=1)
-    options: list[str] = Field(default_factory=list)
+    statement: list[ExamContentBlock] = Field(min_length=1)
+    options: list[list[ExamContentBlock]] = Field(default_factory=list)
+    parts: list[QuestionPart] = Field(default_factory=list)
     answer_format: str = "show_work"
     topic_tags: list[str] = Field(min_length=1)
+
+    @field_validator("statement", mode="before")
+    @classmethod
+    def normalize_statement(cls, value: object) -> object:
+        return _normalize_content_blocks(value)
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def normalize_options(cls, value: object) -> object:
+        return _normalize_content_options(value)
 
 
 class SolutionDraft(StrictModel):
     steps: list[SolutionStep] = Field(min_length=1)
-    final_answer: str = Field(min_length=1)
+    final_answer: list[ExamContentBlock] = Field(min_length=1)
     alternative_solutions: list[list[SolutionStep]] = Field(default_factory=list)
     verification_notes: list[str] = Field(default_factory=list)
+
+    @field_validator("final_answer", mode="before")
+    @classmethod
+    def normalize_final_answer(cls, value: object) -> object:
+        return _normalize_content_blocks(value)
 
 
 class RubricDraft(StrictModel):
     items: list[RubricItem] = Field(min_length=1)
     alternative_solution_policy: str = "award_equivalent_method_credit"
+
+
+class QuestionPlanDraft(StrictModel):
+    section_id: str
+    slot: int = Field(ge=1)
+    topic_tags: list[str] = Field(min_length=1)
+    primary_skill: str = Field(min_length=1)
+    design_brief: str = Field(min_length=1)
+    difficulty: str = Field(min_length=1)
+    estimated_minutes: int = Field(ge=1)
+    answer_form: str = Field(min_length=1)
+    solution_outline: list[str] = Field(min_length=1)
+    rubric_focus: list[str] = Field(min_length=1)
+    verification_methods: list[str] = Field(min_length=1)
+    originality_constraints: list[str] = Field(min_length=1)
+
+
+class QuestionPlanSetDraft(StrictModel):
+    plans: list[QuestionPlanDraft] = Field(min_length=1)
+
+
+class QuestionSlot(BaseModel):
+    section_id: str
+    section_title: str
+    slot: int = Field(ge=1)
+    number: int = Field(ge=1)
+    question_type: QuestionType
+    score: int = Field(ge=1)
+    topic_tags: list[str] = Field(default_factory=list)
+
+
+class QuestionPlan(BaseModel):
+    id: str
+    number: int = Field(ge=1)
+    question_type: QuestionType
+    score: int = Field(ge=1)
+    section_id: str
+    section_title: str
+    slot: int = Field(ge=1)
+    topic_tags: list[str] = Field(min_length=1)
+    primary_skill: str = Field(min_length=1)
+    design_brief: str = Field(min_length=1)
+    difficulty: str = Field(min_length=1)
+    estimated_minutes: int = Field(ge=1)
+    answer_form: str = Field(min_length=1)
+    solution_outline: list[str] = Field(min_length=1)
+    rubric_focus: list[str] = Field(min_length=1)
+    verification_methods: list[str] = Field(min_length=1)
+    originality_constraints: list[str] = Field(min_length=1)
 
 
 class FindingSeverity(StrEnum):

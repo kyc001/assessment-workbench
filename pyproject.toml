@@ -36,6 +36,7 @@ packages = ["src/assessment_workbench"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = [".agents", ".claude", ".codex", ".opencode", ".trellis", "data", "workspaces"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

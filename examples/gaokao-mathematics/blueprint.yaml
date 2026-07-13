@@ -1,4 +1,5 @@
 id: gaokao-math-example-constraint-150
+version: "1"
 subject_profile: gaokao-mathematics
 title: 普通高等学校招生全国统一考试数学模拟卷
 target_level: 高中毕业年级
@@ -36,21 +37,20 @@ sections:
       - 计数原理
   - id: solution
     title: 解答题
-    question_type: calculation
+    question_type: constructed_response
     count: 5
-    score_each: 13
+    question_scores:
+      - 13
+      - 15
+      - 15
+      - 17
+      - 17
     topic_tags:
       - 三角函数与解三角形
       - 数列
       - 概率统计
       - 立体几何
       - 解析几何
-  - id: final
-    title: 压轴解答题
-    question_type: proof
-    count: 1
-    score_each: 12
-    topic_tags:
       - 函数与导数
 coverage:
   - topic_tag: 代数与函数
