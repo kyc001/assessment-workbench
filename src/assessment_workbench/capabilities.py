@@ -98,6 +98,37 @@ class ReviewerRegistry:
         return tuple(sorted(self._definitions))
 
 
+@dataclass(frozen=True)
+class ExamReviewerDefinition:
+    name: str
+    prompt_key: str
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.prompt_key:
+            raise ValueError("exam reviewer name and prompt key cannot be empty")
+
+
+class ExamReviewerRegistry:
+    def __init__(self, definitions: Iterable[ExamReviewerDefinition] = ()) -> None:
+        self._definitions: dict[str, ExamReviewerDefinition] = {}
+        for definition in definitions:
+            self.register(definition)
+
+    def register(self, definition: ExamReviewerDefinition) -> None:
+        if definition.name in self._definitions:
+            raise ValueError(f"exam reviewer is already registered: {definition.name}")
+        self._definitions[definition.name] = definition
+
+    def require(self, name: str) -> ExamReviewerDefinition:
+        try:
+            return self._definitions[name]
+        except KeyError as exc:
+            raise ValueError(f"exam reviewer is not registered: {name}") from exc
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._definitions))
+
+
 class ToolRegistry:
     def __init__(self, definitions: Iterable[ToolDefinition] = ()) -> None:
         self._definitions: dict[str, ToolDefinition] = {}
@@ -200,6 +231,7 @@ class SubjectCapabilityRegistry:
 class CapabilityCatalog:
     prompts: PromptRegistry
     reviewers: ReviewerRegistry
+    exam_reviewers: ExamReviewerRegistry
     tools: ToolRegistry
     validators: ValidatorRegistry
     subjects: SubjectCapabilityRegistry
@@ -293,6 +325,18 @@ def load_default_capability_catalog(
             ReviewerDefinition("structure", handler=_structure_review),
         ]
     )
+    exam_reviewers = ExamReviewerRegistry(
+        [
+            ExamReviewerDefinition("duplication", "exam_reviewer_duplication"),
+            ExamReviewerDefinition("consistency", "exam_reviewer_consistency"),
+            ExamReviewerDefinition("leakage", "exam_reviewer_leakage"),
+            ExamReviewerDefinition("risk", "exam_reviewer_risk"),
+        ]
+    )
+    for reviewer_name in exam_reviewers.names():
+        prompt_registry.require(exam_reviewers.require(reviewer_name).prompt_key)
+    prompt_registry.require("question_plan_reviser")
+    prompt_registry.require("exam_arbiter")
     tools = ToolRegistry(
         [
             ToolDefinition("sympy", "Symbolic mathematics verification capability"),
@@ -316,6 +360,7 @@ def load_default_capability_catalog(
     catalog = CapabilityCatalog(
         prompts=prompt_registry,
         reviewers=reviewers,
+        exam_reviewers=exam_reviewers,
         tools=tools,
         validators=validators,
         subjects=SubjectCapabilityRegistry(),

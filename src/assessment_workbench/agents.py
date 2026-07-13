@@ -12,12 +12,15 @@ from assessment_workbench.compilers import LatexCompiler
 from assessment_workbench.domain import (
     ArtifactRef,
     BlueprintDraft,
+    ExamArbitrationDecision,
     ExamBlueprint,
     ExamDocument,
     ExamGenerationRequest,
     ExamPlanningMode,
     ExamPlanningRecord,
     ExamQuestionBundle,
+    ExamReviewReport,
+    ExamWorkflowState,
     QuestionGenerationRequest,
     QuestionPlan,
     QuestionPlanDraft,
@@ -29,6 +32,12 @@ from assessment_workbench.domain import (
     WorkflowCheckpoint,
     WorkflowRun,
 )
+from assessment_workbench.exam_quality import (
+    validate_bundle_for_plan,
+    validate_question_plan_coverage,
+)
+from assessment_workbench.exam_review_workflow import parse_exam_review_records
+from assessment_workbench.exam_workflow import ExamQualityWorkflow
 from assessment_workbench.latex_service import ExamLatexService
 from assessment_workbench.prompting import complete_with_prompt, json_prompt
 from assessment_workbench.question_workflow import ModelRouter, QuestionAgentWorkflow
@@ -49,6 +58,8 @@ class ExamAgentWorkflow:
         max_total_question_rounds: int = 7,
         max_draft_validation_attempts: int = 3,
         max_reviewer_attempts: int = 2,
+        max_exam_reviewer_attempts: int = 2,
+        max_exam_review_rounds: int = 3,
         max_parallel_questions: int = 1,
         compiler: LatexCompiler | None = None,
         capability_catalog: CapabilityCatalog | None = None,
@@ -81,6 +92,16 @@ class ExamAgentWorkflow:
             max_total_question_rounds=max_total_question_rounds,
             max_draft_validation_attempts=max_draft_validation_attempts,
             max_reviewer_attempts=max_reviewer_attempts,
+        )
+        self.exam_workflow = ExamQualityWorkflow(
+            models.standard,
+            models.strong,
+            artifacts,
+            runs,
+            self.capabilities,
+            max_reviewer_attempts=max_exam_reviewer_attempts,
+            max_review_rounds=max_exam_review_rounds,
+            max_draft_validation_attempts=max_draft_validation_attempts,
         )
 
     async def execute(
@@ -389,6 +410,17 @@ class ExamAgentWorkflow:
                 "_checkpoint_artifacts": {"question_plans": artifact.id},
             }
 
+        async def revise_question_plans(state: dict[str, Any]) -> dict[str, Any]:
+            return await self.exam_workflow.revise_plans(
+                state["run_id"],
+                profile=state["profile"],
+                blueprint=state["blueprint"],
+                current=state["question_plans"],
+                exam_state=state.get("exam_workflow_state"),
+                reports=state.get("exam_reports"),
+                capability_context=request.capability_context,
+            )
+
         async def generate_questions(state: dict[str, Any]) -> dict[str, Any]:
             profile: SubjectProfile = state["profile"]
             blueprint: ExamBlueprint = state["blueprint"]
@@ -412,17 +444,16 @@ class ExamAgentWorkflow:
             existing_records: list[object] = []
             restored_records = state.get("question_runs")
             if isinstance(restored_records, list):
-                existing_records = restored_records
+                existing_records.extend(restored_records)
+            try:
+                editable_records = self.artifacts.read_editable_json(
+                    state["run_id"], "question-runs.json"
+                )
+            except (FileNotFoundError, OSError, ValueError):
+                pass
             else:
-                try:
-                    editable_records = self.artifacts.read_editable_json(
-                        state["run_id"], "question-runs.json"
-                    )
-                except (FileNotFoundError, OSError, ValueError):
-                    pass
-                else:
-                    if isinstance(editable_records, list):
-                        existing_records = editable_records
+                if isinstance(editable_records, list):
+                    existing_records.extend(editable_records)
             for record in existing_records:
                 if not isinstance(record, dict):
                     continue
@@ -434,6 +465,42 @@ class ExamAgentWorkflow:
                 if plan is None or record.get("plan_id") != plan.id:
                     continue
                 records_by_number[number] = {**records_by_number[number], **record}
+
+            exam_state = state.get("exam_workflow_state")
+            target_numbers = (
+                set(exam_state.replacement_question_numbers)
+                if isinstance(exam_state, ExamWorkflowState)
+                else set()
+            )
+            exam_round = exam_state.round if isinstance(exam_state, ExamWorkflowState) else 0
+            for number in target_numbers:
+                if number not in records_by_number:
+                    raise ValueError(f"replacement target has no question plan: {number}")
+                record = records_by_number[number]
+                if record.get("exam_round") == exam_round:
+                    continue
+                history = list(record.get("replacement_history", []))
+                if record.get("run_id") is not None:
+                    history.append(
+                        {
+                            "exam_round": record.get("exam_round", 0),
+                            "run_id": record.get("run_id"),
+                            "bundle_artifact_id": record.get("bundle_artifact_id"),
+                            "status": record.get("status"),
+                        }
+                    )
+                records_by_number[number] = {
+                    **record,
+                    "run_id": None,
+                    "status": RunStatus.QUEUED,
+                    "error": None,
+                    "bundle_artifact_id": None,
+                    "bundle_path": None,
+                    "editable_path": None,
+                    "requires_human_review": False,
+                    "exam_round": exam_round,
+                    "replacement_history": history,
+                }
 
             def ordered_records() -> list[dict[str, Any]]:
                 return [records_by_number[number] for number in sorted(records_by_number)]
@@ -484,6 +551,10 @@ class ExamAgentWorkflow:
                         reused_bundle = ExamQuestionBundle.model_validate(
                             self.artifacts.read_json(bundle_artifact.id)
                         )
+                        validate_bundle_for_plan(reused_bundle, plan)
+                        self.capabilities.validate_bundle(
+                            profile, reused_bundle, capability_validators
+                        )
                     except (KeyError, OSError, ValueError):
                         pending_plans.append(plan)
                     else:
@@ -524,6 +595,12 @@ class ExamAgentWorkflow:
                         capability_id=request.capability_id,
                         capability_version=request.capability_version,
                         capability_context=request.capability_context,
+                        generation_feedback=(
+                            exam_state.question_feedback
+                            if isinstance(exam_state, ExamWorkflowState)
+                            and plan.number in target_numbers
+                            else []
+                        ),
                         on_run_created=child_created,
                     )
                     bundle = child_state.get("bundle")
@@ -563,6 +640,10 @@ class ExamAgentWorkflow:
                             ),
                             "requires_human_review": bool(
                                 child_state.get("requires_human_review", False)
+                            ),
+                            "exam_round": records_by_number[plan.number].get("exam_round", 0),
+                            "replacement_history": records_by_number[plan.number].get(
+                                "replacement_history", []
                             ),
                         },
                         immutable_snapshot=True,
@@ -644,23 +725,64 @@ class ExamAgentWorkflow:
                 "_checkpoint_artifacts": {"exam": artifact.id},
             }
 
+        async def generate_exam_reviews(state: dict[str, Any]) -> dict[str, Any]:
+            return await self.exam_workflow.review(
+                state["run_id"],
+                profile=state["profile"],
+                blueprint=state["blueprint"],
+                plans=state["question_plans"],
+                exam=state["exam"],
+                capability_context=request.capability_context,
+                current_state=state.get("exam_workflow_state"),
+                restored_records=state.get("exam_review_records"),
+            )
+
+        async def arbitrate_exam(state: dict[str, Any]) -> dict[str, Any]:
+            return await self.exam_workflow.arbitrate(
+                state["run_id"],
+                profile=state["profile"],
+                blueprint=state["blueprint"],
+                plans=state["question_plans"],
+                exam=state["exam"],
+                reports=state.get("exam_reports"),
+                current_state=state.get("exam_workflow_state"),
+                capability_context=request.capability_context,
+            )
+
+        async def finalize_exam(state: dict[str, Any]) -> dict[str, Any]:
+            return self.exam_workflow.finalize(state["run_id"], state.get("exam_workflow_state"))
+
         async def approve_exam(state: dict[str, Any]) -> dict[str, Any]:
             question_runs = state.get("question_runs", [])
             escalated = any(
                 isinstance(record, dict) and bool(record.get("requires_human_review"))
                 for record in question_runs
             )
+            exam_state = state.get("exam_workflow_state")
+            escalated = escalated or (
+                isinstance(exam_state, ExamWorkflowState) and exam_state.requires_human_review
+            )
             if not request.require_exam_approval and not escalated:
                 return {}
             bindings = state.get("_checkpoint_artifacts", {})
             prompt = "Approve the assembled exam before document generation."
             if escalated:
-                prompt += " One or more questions were explicitly escalated by arbitration."
+                prompt += " Question-level or whole-exam arbitration requires human review."
             return {
                 "_human_review": {
                     "prompt": prompt,
-                    "artifact_ids": [bindings["exam"], bindings["question_runs"]],
-                    "retry_phase": "EXAM_ASSEMBLING",
+                    "artifact_ids": [
+                        bindings[key]
+                        for key in (
+                            "exam",
+                            "question_runs",
+                            "exam_reviews",
+                            "exam_decision",
+                            "exam_workflow_state",
+                        )
+                        if key in bindings
+                    ],
+                    "retry_phase": "EXAM_REVIEWS_GENERATING",
                 }
             }
 
@@ -707,8 +829,12 @@ class ExamAgentWorkflow:
             ("EXAM_PLANNING", plan_exam),
             ("BLUEPRINT_APPROVAL", approve_blueprint),
             ("QUESTION_PLANNING", plan_questions),
+            ("QUESTION_PLANS_REVISING", revise_question_plans),
             ("QUESTIONS_GENERATING", generate_questions),
             ("EXAM_ASSEMBLING", assemble),
+            ("EXAM_REVIEWS_GENERATING", generate_exam_reviews),
+            ("EXAM_ARBITRATING", arbitrate_exam),
+            ("EXAM_FINALIZING", finalize_exam),
             ("EXAM_APPROVAL", approve_exam),
             ("LATEX_FORMATTING", export),
         ]
@@ -768,6 +894,22 @@ class ExamAgentWorkflow:
             if exam_artifact is None:
                 raise ValueError(f"exam artifact metadata is missing: {exam_artifact_id}")
             state["artifacts"] = [exam_artifact]
+        exam_state_payload = payload("exam_workflow_state")
+        if exam_state_payload is not None:
+            state["exam_workflow_state"] = ExamWorkflowState.model_validate(exam_state_payload)
+        exam_review_manifest = payload("exam_review_manifest")
+        if exam_review_manifest is not None:
+            state["exam_review_records"] = parse_exam_review_records(exam_review_manifest)
+        exam_reviews_payload = payload("exam_reviews")
+        if exam_reviews_payload is not None:
+            if not isinstance(exam_reviews_payload, list):
+                raise ValueError("exam reviews artifact is not a list")
+            state["exam_reports"] = [
+                ExamReviewReport.model_validate(item) for item in exam_reviews_payload
+            ]
+        exam_decision_payload = payload("exam_decision")
+        if exam_decision_payload is not None:
+            state["exam_decision"] = ExamArbitrationDecision.model_validate(exam_decision_payload)
         return state
 
     async def generate_question_run(
@@ -781,6 +923,7 @@ class ExamAgentWorkflow:
         capability_id: str | None = None,
         capability_version: str | None = None,
         capability_context: dict[str, list[str]] | None = None,
+        generation_feedback: list[str] | None = None,
         on_run_created: Callable[[WorkflowRun], None] | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         request = QuestionGenerationRequest(
@@ -792,6 +935,7 @@ class ExamAgentWorkflow:
             capability_id=capability_id,
             capability_version=capability_version,
             capability_context=capability_context or {},
+            generation_feedback=generation_feedback or [],
         )
         return await self.question_workflow.execute(
             request,
@@ -842,8 +986,18 @@ def _materialize_question_plans(
         )
 
     plans: list[QuestionPlan] = []
+    coverage_tags = {target.topic_tag for target in blueprint.coverage}
     for slot in expected_slots:
         draft = received[(slot.section_id, slot.slot)]
+        coverage_tag = draft.coverage_tag
+        if coverage_tags and coverage_tag is None:
+            matching_tags = coverage_tags & set(draft.topic_tags)
+            if len(matching_tags) != 1:
+                raise ValueError(
+                    f"question planner must assign one coverage_tag for slot "
+                    f"{(slot.section_id, slot.slot)}"
+                )
+            coverage_tag = next(iter(matching_tags))
         plans.append(
             QuestionPlan(
                 id=f"{blueprint.id}:q{slot.number:02d}",
@@ -851,7 +1005,9 @@ def _materialize_question_plans(
                 question_type=slot.question_type,
                 score=slot.score,
                 section_title=slot.section_title,
-                **draft.model_dump(),
+                **draft.model_dump(exclude={"coverage_tag"}),
+                coverage_tag=coverage_tag,
             )
         )
+    validate_question_plan_coverage(blueprint, plans)
     return plans

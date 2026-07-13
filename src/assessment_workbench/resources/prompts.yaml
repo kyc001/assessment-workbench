@@ -25,8 +25,20 @@ prompts:
       executable plan for each supplied slot and no other plans. Each plan must define a concrete
       construction, exact assessed skill, difficulty, expected answer form, solution outline,
       rubric focus, verification methods, estimated time, and constraints that prevent overlap
-      with other questions. Do not write the final question or full solution. Keep structural
-      fields aligned with the supplied slot list and obey supplied capability context.
+      with other questions. When the blueprint defines coverage targets, assign every plan exactly
+      one coverage_tag from those targets so score totals close exactly. topic_tags may remain more
+      specific. Do not write the final question or full solution. Keep structural fields aligned
+      with the supplied slot list and obey supplied capability context.
+
+  - key: question_plan_reviser
+    role: question_plan_reviser
+    version: question-plan-reviser-v1
+    system_prompt: >-
+      Revise only the supplied target question plans to resolve whole-exam coverage or difficulty
+      findings. Return exactly one complete plan for each target slot and no other plans. Preserve
+      section_id and slot. coverage_tag must be one of the blueprint targets and revised totals
+      must close exactly. Do not write final questions, answers, or rubrics. Use the supplied
+      unchanged plans as context to avoid duplication and obey capability context.
 
   - key: question_writer
     role: question_writer
@@ -120,3 +132,49 @@ prompts:
       pass a fatal finding. Reject an error as a severity mistake only when the bundle is
       objectively correct, internally consistent, usable, and scorable, and explain that judgment
       explicitly.
+
+  - key: exam_reviewer_duplication
+    role: exam_duplication_reviewer
+    version: exam-review-v1
+    system_prompt: >-
+      Review the complete exam for duplicated constructions, near-paraphrases, repeated solution
+      paths, and excessive skill overlap. Report only whole-exam findings. Every actionable finding
+      must identify the current question UUIDs and/or section IDs. Mark passed false for error or
+      fatal findings and do not invent external-source claims.
+
+  - key: exam_reviewer_consistency
+    role: exam_consistency_reviewer
+    version: exam-review-v1
+    system_prompt: >-
+      Review the complete exam for inconsistent symbols, terminology, assumptions, language,
+      answer conventions, and section presentation. Every actionable finding must identify the
+      current question UUIDs and/or section IDs. Mark passed false only for defects that prevent
+      reliable use; keep cosmetic observations as info or warning.
+
+  - key: exam_reviewer_leakage
+    role: exam_leakage_reviewer
+    version: exam-review-v1
+    system_prompt: >-
+      Review the complete exam for unintended dependencies between questions and for later stems,
+      options, or data that reveal another answer. Every actionable finding must identify all
+      involved current question UUIDs and/or section IDs. Mark passed false for error or fatal
+      findings.
+
+  - key: exam_reviewer_risk
+    role: exam_risk_reviewer
+    version: exam-review-v1
+    system_prompt: >-
+      Review the complete exam for suspicious source imitation, copyright risk visible in the
+      supplied context, and content structures likely to break rendering such as malformed tables,
+      figures, labels, or oversized blocks. Do not claim access to unsupplied sources. Every
+      actionable finding must identify current question UUIDs and/or section IDs.
+
+  - key: exam_arbiter
+    role: exam_arbiter
+    version: exam-arbiter-v1
+    system_prompt: >-
+      Arbitrate deterministic and independent whole-exam reports. Return the smallest valid repair:
+      target concrete current question UUIDs or section IDs and never request a full-exam rewrite
+      when a local replacement suffices. Use rebalance actions only for plan-level coverage or
+      difficulty defects. Never pass fatal findings. Escalate when evidence is ambiguous or the
+      repair budget should not be spent automatically.

@@ -14,8 +14,12 @@ from assessment_workbench.domain import (
     BlueprintDraft,
     CoverageTarget,
     DifficultyDistribution,
+    ExamArbitrationAction,
+    ExamArbitrationDecision,
     ExamBlueprint,
+    ExamDocument,
     ExamPlanningMode,
+    ExamReviewReport,
     ExamSectionBlueprint,
     HumanDecision,
     HumanDecisionType,
@@ -49,6 +53,16 @@ class FixtureModel:
         role = str(kwargs["role"])
         index = self.calls[role]
         self.calls[role] += 1
+        if role not in self.responses:
+            response_model = kwargs["response_model"]
+            if response_model is ExamReviewReport:
+                return ExamReviewReport(reviewer=role, passed=True)
+            if response_model is ExamArbitrationDecision:
+                return ExamArbitrationDecision(
+                    action=ExamArbitrationAction.PASS,
+                    rationale="Fixture whole-exam reviews pass.",
+                )
+            raise KeyError(role)
         response = self.responses[role][index]
         if isinstance(response, BaseException):
             raise response
@@ -631,3 +645,160 @@ async def test_exam_agents_use_locked_preset_without_replanning(tmp_path: Path) 
         "blueprint_id": blueprint.id,
         "blueprint_version": "2",
     }
+
+
+async def test_exam_arbitration_regenerates_only_target_section(tmp_path: Path) -> None:
+    profile = SubjectProfile(
+        id="local-replacement-math",
+        display_name="Mathematics",
+        supported_question_types=[QuestionType.CALCULATION],
+        reviewers=["structure"],
+        latex_template="generic-v1",
+        difficulty_dimensions=["reasoning"],
+    )
+    blueprint = ExamBlueprint(
+        id="local-replacement-exam",
+        subject_profile=profile.id,
+        title="Local replacement exam",
+        target_level="Grade 12",
+        duration_minutes=30,
+        total_score=20,
+        sections=[
+            ExamSectionBlueprint(
+                id="algebra",
+                title="Algebra",
+                question_type=QuestionType.CALCULATION,
+                count=1,
+                score_each=10,
+            ),
+            ExamSectionBlueprint(
+                id="geometry",
+                title="Geometry",
+                question_type=QuestionType.CALCULATION,
+                count=1,
+                score_each=10,
+            ),
+        ],
+        coverage=[
+            CoverageTarget(topic_tag="algebra", target_score=10),
+            CoverageTarget(topic_tag="geometry", target_score=10),
+        ],
+        difficulty_distribution=DifficultyDistribution(easy=0, medium=1, hard=0),
+    )
+    plan_drafts = [
+        QuestionPlanDraft(
+            section_id="algebra",
+            slot=1,
+            topic_tags=["algebra"],
+            primary_skill="Solve a linear equation",
+            design_brief="Use one variable.",
+            difficulty="medium",
+            estimated_minutes=10,
+            answer_form="A value",
+            solution_outline=["Solve"],
+            rubric_focus=["Method", "Answer"],
+            verification_methods=["Substitute"],
+            originality_constraints=["Use original values"],
+        ),
+        QuestionPlanDraft(
+            section_id="geometry",
+            slot=1,
+            topic_tags=["geometry"],
+            primary_skill="Compute a length",
+            design_brief="Use a right triangle.",
+            difficulty="medium",
+            estimated_minutes=10,
+            answer_form="A value",
+            solution_outline=["Apply the theorem"],
+            rubric_focus=["Method", "Answer"],
+            verification_methods=["Check units"],
+            originality_constraints=["Use original values"],
+        ),
+    ]
+    questions = [
+        QuestionDraft(statement="Solve x + 2 = 5.", topic_tags=["algebra"]),
+        QuestionDraft(statement="Find the missing side of the triangle.", topic_tags=["geometry"]),
+        QuestionDraft(statement="Solve 2x + 1 = 7.", topic_tags=["algebra"]),
+    ]
+    solutions = [
+        SolutionDraft(
+            steps=[SolutionStep(id="s1", description="Subtract two.")],
+            final_answer="x = 3",
+        ),
+        SolutionDraft(
+            steps=[SolutionStep(id="s1", description="Apply the theorem.")],
+            final_answer="5",
+        ),
+        SolutionDraft(
+            steps=[SolutionStep(id="s1", description="Subtract one and divide.")],
+            final_answer="x = 3",
+        ),
+    ]
+    rubric = RubricDraft(
+        items=[
+            RubricItem(id="r1", description="Uses a valid method", score=6),
+            RubricItem(id="r2", description="Gets the answer", score=4),
+        ]
+    )
+    question_pass = ArbitrationDecision(
+        action=ArbitrationAction.PASS,
+        rationale="Question is valid.",
+    )
+    standard = FixtureModel(
+        {
+            "question_writer": questions,
+            "rubric_builder": [rubric, rubric, rubric],
+        }
+    )
+    strong = FixtureModel(
+        {
+            "question_set_planner": [QuestionPlanSetDraft(plans=plan_drafts)],
+            "independent_solver": solutions,
+            "question_arbiter": [question_pass, question_pass, question_pass],
+            "exam_arbiter": [
+                ExamArbitrationDecision(
+                    action=ExamArbitrationAction.REGENERATE_SECTION,
+                    rationale="Replace only the algebra section.",
+                    section_ids=["algebra"],
+                    question_feedback=["Use a distinct construction."],
+                ),
+                ExamArbitrationDecision(
+                    action=ExamArbitrationAction.PASS,
+                    rationale="The replacement resolves the finding.",
+                ),
+            ],
+        }
+    )
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    artifacts = ArtifactStore(workspace)
+    workflow = ExamAgentWorkflow(
+        ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
+        artifacts,
+        RunStore(workspace),
+    )
+
+    run, state = await workflow.execute(
+        subject="mathematics",
+        target_level="Grade 12",
+        requirements="Two questions",
+        subject_profile=profile,
+        blueprint=blueprint,
+    )
+
+    assert run.status is RunStatus.SUCCEEDED
+    exam_artifacts = [
+        artifact for artifact in artifacts.list(run.id) if artifact.logical_name == "exam.json"
+    ]
+    assert len(exam_artifacts) == 2
+    first_exam = ExamDocument.model_validate(artifacts.read_json(exam_artifacts[0].id))
+    final_exam = state["exam"]
+    first_by_number = {bundle.question.number: bundle for bundle in first_exam.questions}
+    final_by_number = {bundle.question.number: bundle for bundle in final_exam.questions}
+    assert final_by_number[1].question.id != first_by_number[1].question.id
+    assert final_by_number[2] == first_by_number[2]
+    assert standard.calls["question_writer"] == 3
+    assert strong.calls["independent_solver"] == 3
+    records = state["question_runs"]
+    assert len(records[0]["replacement_history"]) == 1
+    assert records[1].get("replacement_history", []) == []

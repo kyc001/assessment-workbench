@@ -97,6 +97,28 @@ Writer、Solver 和 Rubric 每个阶段完成后立即写不可变 Artifact 和 
 
 每个 Reviewer 使用独立 `question_review` grandchild run。Reviewer 同批并行执行，报告完成后立即写自己的 Artifact，并更新问题级 `review-runs.json` 实时投影和不可变快照。Manifest 绑定 Question、Solution、Rubric 的具体 version ID；只有输入版本完全一致的成功报告可以复用，单个 Reviewer 失败只重试该 Reviewer。
 
+## 整卷审核与局部替换
+
+单题通过后，父运行不会直接进入导出，而是执行整卷级闭环：
+
+```text
+EXAM_ASSEMBLING
+  -> EXAM_REVIEWS_GENERATING
+  -> EXAM_ARBITRATING
+       -> QUESTION_PLANS_REVISING
+       -> QUESTIONS_GENERATING
+       -> EXAM_FINALIZING
+  -> EXAM_APPROVAL
+```
+
+确定性审核负责蓝图、计划和 Bundle 之间可证明的结构事实，包括题号、分区、题型、分值、覆盖分值、难度分布和预计时长。重复、符号与术语一致性、题间答案泄露、来源风险和排版结构由独立 `exam_review` grandchild 并行审核。每个报告绑定 `ExamDocument.id` 以及按题号排序的全部 Question、Solution、Rubric version ID；任一版本变化都会使旧报告失效。
+
+Blueprint 的宏观覆盖桶与细粒度 `topic_tags` 分离。每个 QuestionPlan 使用一个明确的 `coverage_tag` 归属到 Blueprint coverage target，计划物化和局部修订都必须证明各桶分值精确闭合；旧计划仅在其 topic tags 恰好命中一个覆盖桶时自动兼容。
+
+整卷仲裁必须返回当前 Question UUID 或 Blueprint section ID。目标解析集中转换为稳定题号，未知或空目标在创建 child 前失败。`REPLACE_QUESTIONS` 和 `REGENERATE_SECTION` 只把命中题目的父级投影置为 queued；其他成功题继续复用原 child run 和 Bundle。旧 child 指针写入 `replacement_history`，新轮次用 `exam_round` 防止中断恢复时再次使刚完成的替换失效。
+
+`REBALANCE_DIFFICULTY` 和 `REBALANCE_COVERAGE` 先只修订目标 QuestionPlan，再进入相同的局部题目生成路径。合并器要求返回的 slot 集合与目标完全一致，非目标计划保持不变。整卷重试预算耗尽或 Reviewer 无法完成时保留最新 Exam 和审核 Artifact，并进入人工审批。
+
 ## 轻量检索
 
 当前 `LocalKnowledgeBackend` 提供：

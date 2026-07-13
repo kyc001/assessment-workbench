@@ -644,6 +644,7 @@ class QuestionPlanDraft(StrictModel):
     section_id: str
     slot: int = Field(ge=1)
     topic_tags: list[str] = Field(min_length=1)
+    coverage_tag: str | None = None
     primary_skill: str = Field(min_length=1)
     design_brief: str = Field(min_length=1)
     difficulty: str = Field(min_length=1)
@@ -678,6 +679,7 @@ class QuestionPlan(BaseModel):
     section_title: str
     slot: int = Field(ge=1)
     topic_tags: list[str] = Field(min_length=1)
+    coverage_tag: str | None = None
     primary_skill: str = Field(min_length=1)
     design_brief: str = Field(min_length=1)
     difficulty: str = Field(min_length=1)
@@ -716,6 +718,111 @@ class ReviewReport(StrictModel):
     passed: bool
     findings: list[ReviewFinding] = Field(default_factory=list)
     summary: str = ""
+
+
+class ExamReviewTarget(StrEnum):
+    EXAM = "exam"
+    QUESTION = "question"
+    SECTION = "section"
+    PLAN = "plan"
+    LAYOUT = "layout"
+
+
+class ExamReviewFinding(StrictModel):
+    code: str = Field(min_length=1)
+    severity: FindingSeverity
+    target: ExamReviewTarget
+    message: str = Field(min_length=1)
+    question_ids: list[UUID] = Field(default_factory=list)
+    section_ids: list[str] = Field(default_factory=list)
+    suggested_action: str = ""
+
+
+class ExamReviewReport(StrictModel):
+    reviewer: str = Field(min_length=1)
+    passed: bool
+    findings: list[ExamReviewFinding] = Field(default_factory=list)
+    summary: str = ""
+
+
+class ExamBundleVersionSignature(StrictModel):
+    question_version_ids: list[UUID] = Field(min_length=1)
+    solution_version_ids: list[UUID] = Field(min_length=1)
+    rubric_version_ids: list[UUID] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_lengths(self) -> "ExamBundleVersionSignature":
+        lengths = {
+            len(self.question_version_ids),
+            len(self.solution_version_ids),
+            len(self.rubric_version_ids),
+        }
+        if len(lengths) != 1:
+            raise ValueError("exam bundle version signature lengths must match")
+        return self
+
+
+class ExamReviewRequest(StrictModel):
+    reviewer: str = Field(min_length=1)
+    profile: SubjectProfile
+    blueprint: ExamBlueprint
+    plans: list[QuestionPlan] = Field(min_length=1)
+    exam: ExamDocument
+    parent_run_id: UUID
+    attempt: int = Field(ge=1)
+    capability_context: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ExamArbitrationAction(StrEnum):
+    PASS = "pass"
+    PASS_WITH_WARNINGS = "pass_with_warnings"
+    REPLACE_QUESTIONS = "replace_questions"
+    REBALANCE_DIFFICULTY = "rebalance_difficulty"
+    REBALANCE_COVERAGE = "rebalance_coverage"
+    REGENERATE_SECTION = "regenerate_section"
+    ESCALATE_HUMAN = "escalate_human"
+    ABORT = "abort"
+
+
+class ExamArbitrationDecision(StrictModel):
+    action: ExamArbitrationAction
+    rationale: str = Field(min_length=1)
+    finding_codes: list[str] = Field(default_factory=list)
+    question_ids: list[UUID] = Field(default_factory=list)
+    section_ids: list[str] = Field(default_factory=list)
+    plan_feedback: list[str] = Field(default_factory=list)
+    question_feedback: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_targets(self) -> "ExamArbitrationDecision":
+        if self.action in {
+            ExamArbitrationAction.PASS,
+            ExamArbitrationAction.PASS_WITH_WARNINGS,
+            ExamArbitrationAction.ESCALATE_HUMAN,
+            ExamArbitrationAction.ABORT,
+        }:
+            if self.question_ids or self.section_ids:
+                raise ValueError(f"{self.action.value} cannot target questions or sections")
+            return self
+        if self.action is ExamArbitrationAction.REPLACE_QUESTIONS and not self.question_ids:
+            raise ValueError("replace_questions requires question_ids")
+        if self.action is ExamArbitrationAction.REGENERATE_SECTION and not self.section_ids:
+            raise ValueError("regenerate_section requires section_ids")
+        if not self.question_ids and not self.section_ids:
+            raise ValueError(f"{self.action.value} requires question_ids or section_ids")
+        return self
+
+
+class ExamWorkflowState(StrictModel):
+    round: int = Field(default=1, ge=1)
+    replacement_rounds: int = Field(default=0, ge=0)
+    rebalance_rounds: int = Field(default=0, ge=0)
+    replacement_question_numbers: list[int] = Field(default_factory=list)
+    revision_plan_ids: list[str] = Field(default_factory=list)
+    plan_feedback: list[str] = Field(default_factory=list)
+    question_feedback: list[str] = Field(default_factory=list)
+    last_action: ExamArbitrationAction | None = None
+    requires_human_review: bool = False
 
 
 class ArbitrationAction(StrEnum):
@@ -786,6 +893,7 @@ class QuestionGenerationRequest(BaseModel):
     capability_id: str | None = None
     capability_version: str | None = None
     capability_context: dict[str, list[str]] = Field(default_factory=dict)
+    generation_feedback: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_capability_pair(self) -> "QuestionGenerationRequest":
@@ -850,6 +958,23 @@ class ReviewerRunRecord(StrictModel):
     def validate_report_binding(self) -> "ReviewerRunRecord":
         if self.status is RunStatus.SUCCEEDED and self.report_artifact_id is None:
             raise ValueError("succeeded reviewer run requires a report artifact")
+        return self
+
+
+class ExamReviewerRunRecord(StrictModel):
+    reviewer: str = Field(min_length=1)
+    attempt: int = Field(ge=1)
+    run_id: UUID
+    status: RunStatus
+    exam_id: UUID
+    signature: ExamBundleVersionSignature
+    report_artifact_id: UUID | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_report_binding(self) -> "ExamReviewerRunRecord":
+        if self.status is RunStatus.SUCCEEDED and self.report_artifact_id is None:
+            raise ValueError("succeeded exam reviewer run requires a report artifact")
         return self
 
 

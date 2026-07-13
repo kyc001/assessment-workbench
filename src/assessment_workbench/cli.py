@@ -98,6 +98,8 @@ def _exam_workflow(
         ModelRouter(standard=standard, strong=strong),
         ArtifactStore(workspace),
         RunStore(workspace),
+        max_exam_reviewer_attempts=settings.exam_reviewer_attempts,
+        max_exam_review_rounds=settings.exam_review_rounds,
         max_parallel_questions=settings.exam_question_concurrency,
         compiler=compiler,
     )

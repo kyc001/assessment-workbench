@@ -140,7 +140,7 @@ class QuestionAgentWorkflow:
                 request.plan.model_dump(mode="json"),
                 created_by_phase=QUESTION_INITIALIZING,
             )
-            question_state = QuestionWorkflowState()
+            question_state = QuestionWorkflowState(writer_feedback=request.generation_feedback)
             state_artifact = self._write_state(
                 state["run_id"], question_state, QUESTION_INITIALIZING
             )
