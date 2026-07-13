@@ -18,7 +18,11 @@ from assessment_workbench.domain import (
     WorkflowRun,
 )
 from assessment_workbench.ports import StructuredModel
-from assessment_workbench.prompting import complete_with_prompt, json_prompt
+from assessment_workbench.prompting import (
+    complete_with_prompt,
+    context_artifact_ids,
+    json_prompt,
+)
 from assessment_workbench.storage import ArtifactStore, RunStore
 from assessment_workbench.workflow import WorkflowEngine
 
@@ -59,6 +63,8 @@ class ReviewerPoolWorkflow:
         request: QuestionGenerationRequest,
         bundle: ExamQuestionBundle,
         restored_records: object,
+        *,
+        input_artifact_ids: list[UUID],
     ) -> ReviewBatchOutcome:
         records = self._load_records(question_run_id, restored_records)
         manifest_lock = asyncio.Lock()
@@ -98,6 +104,7 @@ class ReviewerPoolWorkflow:
                     capability_context=request.capability_context,
                     parent_run_id=question_run_id,
                     attempt=attempt,
+                    input_artifact_ids=input_artifact_ids,
                 )
 
                 async def run_reviewer(
@@ -226,6 +233,13 @@ class ReviewerPoolWorkflow:
                     ),
                     response_model=ReviewReport,
                     run_id=state["run_id"],
+                    artifacts=self.artifacts,
+                    created_by_phase=REVIEW_GENERATING,
+                    input_artifact_ids=[
+                        request_artifact.id,
+                        *request.input_artifact_ids,
+                        *context_artifact_ids(state),
+                    ],
                 )
                 report = report.model_copy(update={"reviewer": request.reviewer})
             report_artifact = self.artifacts.write_json(

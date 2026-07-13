@@ -183,35 +183,33 @@ class WorkflowEngine:
                         )
                     )
                     raise
-                self.store.append_event(
-                    PhaseEvent(
-                        run_id=run.id,
-                        workflow=run.workflow,
-                        phase=phase,
-                        status=PhaseStatus.COMPLETED,
-                        occurrence_id=occurrence_id,
-                        round=round_number,
-                        parent_run_id=parent_run_id,
-                        parent_event_id=parent_event_id,
-                        input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
-                        output_artifact_ids=_artifact_ids(state.get("output_artifact_ids")),
-                        started_at=started_at,
-                        completed_at=now_utc(),
-                    )
+                completed_event = PhaseEvent(
+                    run_id=run.id,
+                    workflow=run.workflow,
+                    phase=phase,
+                    status=PhaseStatus.COMPLETED,
+                    occurrence_id=occurrence_id,
+                    round=round_number,
+                    parent_run_id=parent_run_id,
+                    parent_event_id=parent_event_id,
+                    input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
+                    output_artifact_ids=_artifact_ids(state.get("output_artifact_ids")),
+                    started_at=started_at,
+                    completed_at=now_utc(),
                 )
                 if self._cancel_if_requested(run):
+                    self.store.append_event(completed_event)
                     return run, state
                 state.pop("_human_review", None)
-                self.store.save_checkpoint(
-                    WorkflowCheckpoint(
-                        run_id=run.id,
-                        workflow=run.workflow,
-                        next_step_index=resume_step_index,
-                        context=_checkpoint_context(state),
-                        artifact_bindings=_artifact_bindings(state.get("_checkpoint_artifacts")),
-                        child_run_ids=_child_run_ids(state.get("_checkpoint_child_run_ids")),
-                    )
+                checkpoint = WorkflowCheckpoint(
+                    run_id=run.id,
+                    workflow=run.workflow,
+                    next_step_index=resume_step_index,
+                    context=_checkpoint_context(state),
+                    artifact_bindings=_artifact_bindings(state.get("_checkpoint_artifacts")),
+                    child_run_ids=_child_run_ids(state.get("_checkpoint_child_run_ids")),
                 )
+                self.store.commit_phase(completed_event, checkpoint)
                 if isinstance(human_review, dict):
                     request = HumanReviewRequest(
                         run_id=run.id,

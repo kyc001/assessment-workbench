@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from assessment_workbench.domain import (
     ModelCall,
     ParsedDocument,
     PhaseEvent,
+    PhaseStatus,
     RetrievalHit,
     RunStatus,
     WorkflowCheckpoint,
@@ -143,18 +145,18 @@ class RunStore:
 
     def save_checkpoint(self, checkpoint: WorkflowCheckpoint) -> None:
         with self.workspace.connect() as connection:
-            connection.execute(
-                """INSERT OR REPLACE INTO workflow_checkpoints
-                (run_id, workflow, next_step_index, created_at, payload)
-                VALUES (?, ?, ?, ?, ?)""",
-                (
-                    str(checkpoint.run_id),
-                    checkpoint.workflow,
-                    checkpoint.next_step_index,
-                    checkpoint.created_at.isoformat(),
-                    checkpoint.model_dump_json(),
-                ),
-            )
+            self._upsert_checkpoint(connection, checkpoint)
+
+    def commit_phase(self, event: PhaseEvent, checkpoint: WorkflowCheckpoint) -> None:
+        if event.status is not PhaseStatus.COMPLETED:
+            raise ValueError("only completed phase events can be committed with a checkpoint")
+        if event.run_id != checkpoint.run_id or event.workflow != checkpoint.workflow:
+            raise ValueError("phase event and checkpoint must belong to the same workflow run")
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_phase_event(connection, event)
+            self._upsert_checkpoint(connection, checkpoint)
+            connection.commit()
 
     def get_checkpoint(self, run_id: UUID) -> WorkflowCheckpoint | None:
         with self.workspace.connect() as connection:
@@ -255,36 +257,58 @@ class RunStore:
 
     def append_event(self, event: PhaseEvent) -> None:
         with self.workspace.connect() as connection:
-            connection.execute(
-                """INSERT INTO phase_events
-                (id, run_id, workflow, phase, status, occurrence_id, round,
-                 parent_run_id, parent_event_id, entity_type, entity_id,
-                 input_artifact_ids, output_artifact_ids, started_at, completed_at,
-                 summary, warnings, error_code, error_details, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(event.id),
-                    str(event.run_id),
-                    event.workflow,
-                    event.phase,
-                    event.status,
-                    str(event.occurrence_id),
-                    event.round,
-                    str(event.parent_run_id) if event.parent_run_id else None,
-                    str(event.parent_event_id) if event.parent_event_id else None,
-                    event.entity_type,
-                    event.entity_id,
-                    json.dumps([str(value) for value in event.input_artifact_ids]),
-                    json.dumps([str(value) for value in event.output_artifact_ids]),
-                    event.started_at.isoformat(),
-                    event.completed_at.isoformat() if event.completed_at else None,
-                    event.summary,
-                    json.dumps(event.warnings, ensure_ascii=False),
-                    event.error_code,
-                    json.dumps(event.error_details, ensure_ascii=False),
-                    event.error,
-                ),
-            )
+            self._insert_phase_event(connection, event)
+
+    @staticmethod
+    def _upsert_checkpoint(
+        connection: sqlite3.Connection,
+        checkpoint: WorkflowCheckpoint,
+    ) -> None:
+        connection.execute(
+            """INSERT OR REPLACE INTO workflow_checkpoints
+            (run_id, workflow, next_step_index, created_at, payload)
+            VALUES (?, ?, ?, ?, ?)""",
+            (
+                str(checkpoint.run_id),
+                checkpoint.workflow,
+                checkpoint.next_step_index,
+                checkpoint.created_at.isoformat(),
+                checkpoint.model_dump_json(),
+            ),
+        )
+
+    @staticmethod
+    def _insert_phase_event(connection: sqlite3.Connection, event: PhaseEvent) -> None:
+        connection.execute(
+            """INSERT INTO phase_events
+            (id, run_id, workflow, phase, status, occurrence_id, round,
+             parent_run_id, parent_event_id, entity_type, entity_id,
+             input_artifact_ids, output_artifact_ids, started_at, completed_at,
+             summary, warnings, error_code, error_details, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(event.id),
+                str(event.run_id),
+                event.workflow,
+                event.phase,
+                event.status,
+                str(event.occurrence_id),
+                event.round,
+                str(event.parent_run_id) if event.parent_run_id else None,
+                str(event.parent_event_id) if event.parent_event_id else None,
+                event.entity_type,
+                event.entity_id,
+                json.dumps([str(value) for value in event.input_artifact_ids]),
+                json.dumps([str(value) for value in event.output_artifact_ids]),
+                event.started_at.isoformat(),
+                event.completed_at.isoformat() if event.completed_at else None,
+                event.summary,
+                json.dumps(event.warnings, ensure_ascii=False),
+                event.error_code,
+                json.dumps(event.error_details, ensure_ascii=False),
+                event.error,
+            ),
+        )
 
     def list_runs(self) -> list[WorkflowRun]:
         with self.workspace.connect() as connection:
@@ -535,31 +559,42 @@ class ArtifactStore:
     ) -> ArtifactRef:
         run_dir = self.workspace.artifacts / str(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
-        version = self._next_version(run_id, logical_name)
-        destination = run_dir / _versioned_name(logical_name, version)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact-", dir=run_dir)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_name, destination)
-        except Exception:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
-            raise
-        artifact = ArtifactRef(
-            run_id=run_id,
-            logical_name=logical_name,
-            version=version,
-            path=destination.relative_to(self.workspace.root),
-            media_type=media_type,
-            sha256=hashlib.sha256(content).hexdigest(),
-            size_bytes=len(content),
-            created_by_phase=created_by_phase,
-        )
-        self._save(artifact)
-        return artifact
+        destination: Path | None = None
+        temporary_name: str | None = None
+        published = False
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                version = self._next_version(connection, run_id, logical_name)
+                destination = run_dir / _versioned_name(logical_name, version)
+                descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact-", dir=run_dir)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_name, destination)
+                temporary_name = None
+                published = True
+                artifact = ArtifactRef(
+                    run_id=run_id,
+                    logical_name=logical_name,
+                    version=version,
+                    path=destination.relative_to(self.workspace.root),
+                    media_type=media_type,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    size_bytes=len(content),
+                    created_by_phase=created_by_phase,
+                )
+                self._insert_artifact(connection, artifact)
+                connection.commit()
+                return artifact
+            except Exception:
+                connection.rollback()
+                if temporary_name is not None and os.path.exists(temporary_name):
+                    os.unlink(temporary_name)
+                if published and destination is not None and destination.exists():
+                    destination.unlink()
+                raise
 
     def write_editable_json(
         self,
@@ -637,36 +672,62 @@ class ArtifactStore:
             return False
         return True
 
-    def _next_version(self, run_id: UUID, logical_name: str) -> int:
+    def reconcile(self) -> builtins.list[Path]:
+        removed: builtins.list[Path] = []
         with self.workspace.connect() as connection:
-            row = connection.execute(
-                "SELECT COALESCE(MAX(version), 0) AS version FROM artifacts "
-                "WHERE run_id=? AND logical_name=?",
-                (str(run_id), logical_name),
-            ).fetchone()
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute("SELECT path FROM artifacts").fetchall()
+            referenced = {(self.workspace.root / Path(str(row["path"]))).resolve() for row in rows}
+            for path in self.workspace.artifacts.rglob("*"):
+                if not path.is_file():
+                    continue
+                recognized = path.name.startswith(".artifact-") or re.fullmatch(
+                    r".+\.v[1-9]\d*(?:\.[^.]+)*", path.name
+                )
+                if not recognized or path.resolve() in referenced:
+                    continue
+                path.unlink()
+                removed.append(path.relative_to(self.workspace.root))
+            connection.commit()
+        return sorted(removed, key=str)
+
+    @staticmethod
+    def _next_version(
+        connection: sqlite3.Connection,
+        run_id: UUID,
+        logical_name: str,
+    ) -> int:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM artifacts "
+            "WHERE run_id=? AND logical_name=?",
+            (str(run_id), logical_name),
+        ).fetchone()
         return int(row["version"]) + 1
 
-    def _save(self, artifact: ArtifactRef) -> None:
-        with self.workspace.connect() as connection:
-            connection.execute(
-                """INSERT INTO artifacts
-                (id, run_id, logical_name, version, path, media_type, sha256,
-                 size_bytes, created_by_phase, created_at, payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(artifact.id),
-                    str(artifact.run_id),
-                    artifact.logical_name,
-                    artifact.version,
-                    str(artifact.path),
-                    artifact.media_type,
-                    artifact.sha256,
-                    artifact.size_bytes,
-                    artifact.created_by_phase,
-                    artifact.created_at.isoformat(),
-                    artifact.model_dump_json(),
-                ),
-            )
+    @staticmethod
+    def _insert_artifact(
+        connection: sqlite3.Connection,
+        artifact: ArtifactRef,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO artifacts
+            (id, run_id, logical_name, version, path, media_type, sha256,
+             size_bytes, created_by_phase, created_at, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(artifact.id),
+                str(artifact.run_id),
+                artifact.logical_name,
+                artifact.version,
+                str(artifact.path),
+                artifact.media_type,
+                artifact.sha256,
+                artifact.size_bytes,
+                artifact.created_by_phase,
+                artifact.created_at.isoformat(),
+                artifact.model_dump_json(),
+            ),
+        )
 
     @staticmethod
     def sha256(path: Path) -> str:
@@ -876,6 +937,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
     started_at TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS model_calls_run_id_idx ON model_calls(run_id, started_at);
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id),

@@ -30,7 +30,11 @@ from assessment_workbench.domain import (
     WorkflowRun,
 )
 from assessment_workbench.ports import StructuredModel
-from assessment_workbench.prompting import complete_with_prompt, json_prompt
+from assessment_workbench.prompting import (
+    complete_with_prompt,
+    context_artifact_ids,
+    json_prompt,
+)
 from assessment_workbench.review_workflow import (
     ReviewerPoolWorkflow,
     parse_review_records,
@@ -178,6 +182,9 @@ class QuestionAgentWorkflow:
                     ),
                     response_model=QuestionDraft,
                     run_id=state["run_id"],
+                    artifacts=self.artifacts,
+                    created_by_phase=PROBLEM_GENERATING,
+                    input_artifact_ids=context_artifact_ids(state),
                 )
                 try:
                     question = QuestionVersion(
@@ -236,6 +243,9 @@ class QuestionAgentWorkflow:
                     ),
                     response_model=SolutionDraft,
                     run_id=state["run_id"],
+                    artifacts=self.artifacts,
+                    created_by_phase=SOLUTION_GENERATING,
+                    input_artifact_ids=context_artifact_ids(state),
                 )
                 try:
                     solution = SolutionVersion(
@@ -292,6 +302,9 @@ class QuestionAgentWorkflow:
                     ),
                     response_model=RubricDraft,
                     run_id=state["run_id"],
+                    artifacts=self.artifacts,
+                    created_by_phase=RUBRIC_GENERATING,
+                    input_artifact_ids=context_artifact_ids(state),
                 )
                 try:
                     rubric = RubricVersion(
@@ -335,6 +348,7 @@ class QuestionAgentWorkflow:
                 request,
                 bundle,
                 state.get("review_records"),
+                input_artifact_ids=context_artifact_ids(state),
             )
             reports_artifact = self.artifacts.write_json(
                 state["run_id"],
@@ -378,6 +392,7 @@ class QuestionAgentWorkflow:
                 request,
                 bundle,
                 reports,
+                context_artifact_ids(state),
             )
             decision_artifact = self.artifacts.write_json(
                 state["run_id"],
@@ -532,6 +547,7 @@ class QuestionAgentWorkflow:
         request: QuestionGenerationRequest,
         bundle: ExamQuestionBundle,
         reports: list[ReviewReport],
+        input_artifact_ids: list[UUID],
     ) -> ArbitrationDecision:
         prompt = self.prompts.require("question_arbiter")
         decision = await complete_with_prompt(
@@ -545,6 +561,9 @@ class QuestionAgentWorkflow:
             ),
             response_model=ArbitrationDecision,
             run_id=run_id,
+            artifacts=self.artifacts,
+            created_by_phase=ARBITRATING,
+            input_artifact_ids=input_artifact_ids,
         )
         fatal_findings = [
             finding

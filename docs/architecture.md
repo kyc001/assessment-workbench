@@ -50,10 +50,15 @@ CLI
 - role
 - model
 - prompt version
-- request/response SHA-256
+- ContextPack Artifact ID/SHA-256
+- system Prompt 与实际 strict response Schema SHA-256
+- 初始/修复请求 SHA-256 序列和 repair count
+- response SHA-256、provider request ID 和 finish reason
 - token usage
 - start/end time
 - failure detail
+
+逐题、Reviewer、Arbiter 和整卷规划调用在 HTTP 请求前写 `model-context.json`。ContextPack 保存精确结构化 user payload，并绑定当时输入 Artifact 的 run ID、artifact ID、logical name、version 和 SHA-256。它不包含 API Key、Authorization Header 或环境变量；课程上下文仍可能敏感，因此 ContextPack 只属于本地 workspace，不提交到 Git。
 
 知识抽取只有引用现有 `source_block_ids` 的节点和关系才会物化到课程图谱。
 
@@ -118,6 +123,12 @@ Blueprint 的宏观覆盖桶与细粒度 `topic_tags` 分离。每个 QuestionPl
 整卷仲裁必须返回当前 Question UUID 或 Blueprint section ID。目标解析集中转换为稳定题号，未知或空目标在创建 child 前失败。`REPLACE_QUESTIONS` 和 `REGENERATE_SECTION` 只把命中题目的父级投影置为 queued；其他成功题继续复用原 child run 和 Bundle。旧 child 指针写入 `replacement_history`，新轮次用 `exam_round` 防止中断恢复时再次使刚完成的替换失效。
 
 `REBALANCE_DIFFICULTY` 和 `REBALANCE_COVERAGE` 先只修订目标 QuestionPlan，再进入相同的局部题目生成路径。合并器要求返回的 slot 集合与目标完全一致，非目标计划保持不变。整卷重试预算耗尽或 Reviewer 无法完成时保留最新 Exam 和审核 Artifact，并进入人工审批。
+
+## Artifact 与阶段提交事务
+
+Artifact 发布使用 SQLite `BEGIN IMMEDIATE` 串行化同 workspace 的版本分配。临时文件完成 flush/fsync 后原子替换到版本路径，随后在同一数据库临界区插入元数据并提交；insert 或 commit 失败会 rollback 并删除本次 final 文件。若进程在文件替换后直接终止，数据库不会暴露未提交行，下一次相同 logical name 会分配同一 version 并覆盖孤立文件；`reconcile` 只清理可识别的临时文件和未被数据库引用的 `.vN` 文件。
+
+WorkflowEngine 通过 `RunStore.commit_phase` 在一个 SQLite 事务内提交 completed PhaseEvent 和对应 checkpoint，避免出现时间线显示阶段完成、恢复点却仍停留在上一阶段的状态。文件系统与 SQLite 不是同一个事务域，因此这里采用可恢复发布与补偿协议，而不是声称跨介质绝对 ACID。
 
 ## 轻量检索
 

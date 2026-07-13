@@ -22,7 +22,11 @@ from assessment_workbench.domain import (
 )
 from assessment_workbench.exam_quality import exam_bundle_signature, validate_exam_review_report
 from assessment_workbench.ports import StructuredModel
-from assessment_workbench.prompting import complete_with_prompt, json_prompt
+from assessment_workbench.prompting import (
+    complete_with_prompt,
+    context_artifact_ids,
+    json_prompt,
+)
 from assessment_workbench.storage import ArtifactStore, RunStore
 from assessment_workbench.workflow import WorkflowEngine
 
@@ -71,6 +75,7 @@ class ExamReviewerPoolWorkflow:
         exam: ExamDocument,
         capability_context: dict[str, list[str]],
         restored_records: object,
+        input_artifact_ids: list[UUID],
     ) -> ExamReviewBatchOutcome:
         records = self._load_records(parent_run_id, restored_records)
         signature = exam_bundle_signature(exam)
@@ -117,6 +122,7 @@ class ExamReviewerPoolWorkflow:
                     capability_context=capability_context,
                     parent_run_id=parent_run_id,
                     attempt=attempt,
+                    input_artifact_ids=input_artifact_ids,
                 )
 
                 async def run_reviewer(current_request: ExamReviewRequest = review_request) -> None:
@@ -241,6 +247,13 @@ class ExamReviewerPoolWorkflow:
                 ),
                 response_model=ExamReviewReport,
                 run_id=state["run_id"],
+                artifacts=self.artifacts,
+                created_by_phase=EXAM_REVIEW_GENERATING,
+                input_artifact_ids=[
+                    request_artifact.id,
+                    *request.input_artifact_ids,
+                    *context_artifact_ids(state),
+                ],
             )
             report = report.model_copy(update={"reviewer": request.reviewer})
             validate_exam_review_report(report, request.exam, request.blueprint)

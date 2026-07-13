@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterable
 from importlib.resources import files
@@ -10,7 +11,14 @@ from uuid import UUID
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from assessment_workbench.domain import (
+    ContextArtifactBinding,
+    ContextPack,
+    ModelAuditContext,
+)
+from assessment_workbench.model_contracts import canonical_json_sha256, strict_json_schema
 from assessment_workbench.ports import StructuredModel
+from assessment_workbench.storage import ArtifactStore
 
 
 class PromptBundle(BaseModel):
@@ -60,7 +68,40 @@ async def complete_with_prompt[ResponseT: BaseModel](
     user_prompt: str,
     response_model: type[ResponseT],
     run_id: UUID,
+    artifacts: ArtifactStore,
+    created_by_phase: str,
+    input_artifact_ids: Iterable[UUID] = (),
 ) -> ResponseT:
+    try:
+        payload = json.loads(user_prompt)
+    except json.JSONDecodeError as exc:
+        raise ValueError("model user prompt must be a JSON object") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("model user prompt must be a JSON object")
+    bindings = _context_artifact_bindings(artifacts, input_artifact_ids)
+    context_pack = ContextPack(
+        prompt_key=prompt.key,
+        role=prompt.role,
+        prompt_version=prompt.version,
+        response_model=response_model.__name__,
+        user_prompt_sha256=_text_sha256(user_prompt),
+        payload=payload,
+        input_artifacts=bindings,
+    )
+    context_artifact = artifacts.write_json(
+        run_id,
+        "model-context.json",
+        context_pack.model_dump(mode="json"),
+        created_by_phase=created_by_phase,
+    )
+    audit_context = ModelAuditContext(
+        context_pack_id=context_artifact.id,
+        context_pack_sha256=context_artifact.sha256,
+        system_prompt_sha256=_text_sha256(prompt.system_prompt),
+        response_schema_sha256=canonical_json_sha256(
+            strict_json_schema(response_model.model_json_schema())
+        ),
+    )
     return await model.complete(
         role=prompt.role,
         system_prompt=prompt.system_prompt,
@@ -68,11 +109,52 @@ async def complete_with_prompt[ResponseT: BaseModel](
         response_model=response_model,
         prompt_version=prompt.version,
         run_id=str(run_id),
+        audit_context=audit_context,
     )
 
 
 def json_prompt(**payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+
+
+def context_artifact_ids(state: dict[str, Any]) -> list[UUID]:
+    bindings = state.get("_checkpoint_artifacts")
+    if not isinstance(bindings, dict):
+        return []
+    artifact_ids: list[UUID] = []
+    for value in bindings.values():
+        if isinstance(value, UUID):
+            artifact_ids.append(value)
+        elif isinstance(value, str):
+            artifact_ids.append(UUID(value))
+        else:
+            raise TypeError("checkpoint artifact binding must contain UUID values")
+    return list(dict.fromkeys(artifact_ids))
+
+
+def _context_artifact_bindings(
+    artifacts: ArtifactStore,
+    artifact_ids: Iterable[UUID],
+) -> list[ContextArtifactBinding]:
+    bindings: list[ContextArtifactBinding] = []
+    for artifact_id in dict.fromkeys(artifact_ids):
+        artifact = artifacts.get(artifact_id)
+        if artifact is None or not artifacts.verify(artifact_id):
+            raise ValueError(f"model context input artifact is missing or invalid: {artifact_id}")
+        bindings.append(
+            ContextArtifactBinding(
+                artifact_id=artifact.id,
+                run_id=artifact.run_id,
+                logical_name=artifact.logical_name,
+                version=artifact.version,
+                sha256=artifact.sha256,
+            )
+        )
+    return bindings
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _load_yaml(content: str, source: Path) -> dict[str, Any]:

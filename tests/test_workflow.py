@@ -3,11 +3,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from assessment_workbench.domain import (
     HumanDecision,
     HumanDecisionType,
+    PhaseEvent,
     PhaseStatus,
     RunStatus,
+    WorkflowCheckpoint,
+    now_utc,
 )
 from assessment_workbench.storage import RunStore, Workspace
 from assessment_workbench.workflow import WorkflowEngine
@@ -71,6 +76,39 @@ def test_cancel_request_uses_cancelling_state(tmp_path: Path) -> None:
 
     assert store.request_cancel(queued.id).status is RunStatus.CANCELLED
     assert store.request_cancel(running.id).status is RunStatus.CANCELLING
+
+
+def test_phase_event_and_checkpoint_rollback_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    run = store.create("phase-transaction")
+    event = PhaseEvent(
+        run_id=run.id,
+        workflow=run.workflow,
+        phase="WRITE",
+        status=PhaseStatus.COMPLETED,
+        occurrence_id=uuid4(),
+        started_at=now_utc(),
+        completed_at=now_utc(),
+    )
+    checkpoint = WorkflowCheckpoint(
+        run_id=run.id,
+        workflow=run.workflow,
+        next_step_index=1,
+    )
+
+    def fail_checkpoint(*_: Any) -> None:
+        raise RuntimeError("injected checkpoint failure")
+
+    monkeypatch.setattr(store, "_upsert_checkpoint", fail_checkpoint)
+    with pytest.raises(RuntimeError, match="injected checkpoint failure"):
+        store.commit_phase(event, checkpoint)
+
+    assert store.events(run.id) == []
+    assert store.get_checkpoint(run.id) is None
 
 
 async def test_resume_starts_after_last_checkpoint(tmp_path: Path) -> None:

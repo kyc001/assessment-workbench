@@ -26,7 +26,10 @@ from assessment_workbench.exam_review_workflow import (
     ExamReviewerPoolWorkflow,
 )
 from assessment_workbench.ports import StructuredModel
-from assessment_workbench.prompting import complete_with_prompt, json_prompt
+from assessment_workbench.prompting import (
+    complete_with_prompt,
+    json_prompt,
+)
 from assessment_workbench.storage import ArtifactStore, RunStore
 
 QUESTION_PLANS_REVISING = "QUESTION_PLANS_REVISING"
@@ -75,6 +78,7 @@ class ExamQualityWorkflow:
         exam_state: object,
         reports: object,
         capability_context: dict[str, list[str]],
+        input_artifact_ids: list[UUID],
     ) -> dict[str, Any]:
         if not isinstance(exam_state, ExamWorkflowState) or not exam_state.revision_plan_ids:
             return {}
@@ -103,6 +107,9 @@ class ExamQualityWorkflow:
                 ),
                 response_model=QuestionPlanSetDraft,
                 run_id=run_id,
+                artifacts=self.artifacts,
+                created_by_phase=QUESTION_PLANS_REVISING,
+                input_artifact_ids=input_artifact_ids,
             )
             try:
                 revised = merge_revised_question_plans(current, target_ids, draft.plans)
@@ -140,6 +147,7 @@ class ExamQualityWorkflow:
         capability_context: dict[str, list[str]],
         current_state: object,
         restored_records: object,
+        input_artifact_ids: list[UUID],
     ) -> dict[str, Any]:
         exam_state = (
             current_state if isinstance(current_state, ExamWorkflowState) else ExamWorkflowState()
@@ -160,6 +168,7 @@ class ExamQualityWorkflow:
                 exam=exam,
                 capability_context=capability_context,
                 restored_records=restored_records,
+                input_artifact_ids=input_artifact_ids,
             )
         except ExamReviewerExhaustedError as exc:
             exhausted_state = exam_state.model_copy(
@@ -220,6 +229,7 @@ class ExamQualityWorkflow:
         reports: object,
         current_state: object,
         capability_context: dict[str, list[str]],
+        input_artifact_ids: list[UUID],
     ) -> dict[str, Any]:
         if not isinstance(reports, list) or not all(
             isinstance(report, ExamReviewReport) for report in reports
@@ -239,6 +249,9 @@ class ExamQualityWorkflow:
             ),
             response_model=ExamArbitrationDecision,
             run_id=run_id,
+            artifacts=self.artifacts,
+            created_by_phase=EXAM_ARBITRATING,
+            input_artifact_ids=input_artifact_ids,
         )
         decision = self.enforce_review_gate(decision, reports)
         decision_artifact = self.artifacts.write_json(

@@ -17,7 +17,7 @@
 - SQLite 保存运行、事件、材料、知识点和关系
 - 每个知识点保留文档页码和内容块证据
 - 可选 OpenAI-compatible 语义知识抽取，严格使用 JSON Schema 输出
-- 模型调用记录角色、模型、Prompt 版本、请求/响应哈希、token 和错误
+- 模型调用绑定版本化 ContextPack，记录 Prompt/Schema/请求序列哈希、token 和错误
 - 版本化 Prompt Registry 与科目能力包，已注册科目可锁定结构，未知科目由 Agent 动态规划
 - 单题 Writer/Solver/Rubric 阶段可恢复，Reviewer 独立并行运行并只重试失败项
 - 整卷审核绑定全部题目版本，仲裁只重跑命中的题目或分区并保留替换历史

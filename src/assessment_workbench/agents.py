@@ -39,7 +39,11 @@ from assessment_workbench.exam_quality import (
 from assessment_workbench.exam_review_workflow import parse_exam_review_records
 from assessment_workbench.exam_workflow import ExamQualityWorkflow
 from assessment_workbench.latex_service import ExamLatexService
-from assessment_workbench.prompting import complete_with_prompt, json_prompt
+from assessment_workbench.prompting import (
+    complete_with_prompt,
+    context_artifact_ids,
+    json_prompt,
+)
 from assessment_workbench.question_workflow import ModelRouter, QuestionAgentWorkflow
 from assessment_workbench.storage import ArtifactStore, RunStore
 from assessment_workbench.workflow import Step, WorkflowEngine
@@ -232,6 +236,12 @@ class ExamAgentWorkflow:
                         ),
                         response_model=SubjectProfileCandidate,
                         run_id=state["run_id"],
+                        artifacts=self.artifacts,
+                        created_by_phase="SUBJECT_RESEARCHING",
+                        input_artifact_ids=[
+                            request_artifact.id,
+                            *context_artifact_ids(state),
+                        ],
                     )
                     profile = SubjectProfile(
                         id=candidate.subject_id,
@@ -293,6 +303,9 @@ class ExamAgentWorkflow:
                         ),
                         response_model=BlueprintDraft,
                         run_id=state["run_id"],
+                        artifacts=self.artifacts,
+                        created_by_phase="EXAM_PLANNING",
+                        input_artifact_ids=context_artifact_ids(state),
                     )
                     exam_blueprint = ExamBlueprint(
                         id=f"{profile.id}-{uuid4().hex[:12]}",
@@ -385,6 +398,9 @@ class ExamAgentWorkflow:
                     ),
                     response_model=QuestionPlanSetDraft,
                     run_id=state["run_id"],
+                    artifacts=self.artifacts,
+                    created_by_phase="QUESTION_PLANNING",
+                    input_artifact_ids=context_artifact_ids(state),
                 )
                 try:
                     question_plans = _materialize_question_plans(exam_blueprint, draft.plans)
@@ -419,6 +435,7 @@ class ExamAgentWorkflow:
                 exam_state=state.get("exam_workflow_state"),
                 reports=state.get("exam_reports"),
                 capability_context=request.capability_context,
+                input_artifact_ids=context_artifact_ids(state),
             )
 
         async def generate_questions(state: dict[str, Any]) -> dict[str, Any]:
@@ -735,6 +752,7 @@ class ExamAgentWorkflow:
                 capability_context=request.capability_context,
                 current_state=state.get("exam_workflow_state"),
                 restored_records=state.get("exam_review_records"),
+                input_artifact_ids=context_artifact_ids(state),
             )
 
         async def arbitrate_exam(state: dict[str, Any]) -> dict[str, Any]:
@@ -747,6 +765,7 @@ class ExamAgentWorkflow:
                 reports=state.get("exam_reports"),
                 current_state=state.get("exam_workflow_state"),
                 capability_context=request.capability_context,
+                input_artifact_ids=context_artifact_ids(state),
             )
 
         async def finalize_exam(state: dict[str, Any]) -> dict[str, Any]:

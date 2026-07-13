@@ -2,6 +2,7 @@ import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -771,6 +772,7 @@ class ExamReviewRequest(StrictModel):
     parent_run_id: UUID
     attempt: int = Field(ge=1)
     capability_context: dict[str, list[str]] = Field(default_factory=dict)
+    input_artifact_ids: list[UUID] = Field(default_factory=list)
 
 
 class ExamArbitrationAction(StrEnum):
@@ -909,6 +911,33 @@ class QuestionReviewRequest(StrictModel):
     capability_context: dict[str, list[str]] = Field(default_factory=dict)
     parent_run_id: UUID
     attempt: int = Field(ge=1)
+    input_artifact_ids: list[UUID] = Field(default_factory=list)
+
+
+class ContextArtifactBinding(StrictModel):
+    artifact_id: UUID
+    run_id: UUID
+    logical_name: str = Field(min_length=1)
+    version: int = Field(ge=1)
+    sha256: str = Field(min_length=64, max_length=64)
+
+
+class ContextPack(StrictModel):
+    format_version: str = "1"
+    prompt_key: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    response_model: str = Field(min_length=1)
+    user_prompt_sha256: str = Field(min_length=64, max_length=64)
+    payload: dict[str, Any]
+    input_artifacts: list[ContextArtifactBinding] = Field(default_factory=list)
+
+
+class ModelAuditContext(StrictModel):
+    context_pack_id: UUID
+    context_pack_sha256: str = Field(min_length=64, max_length=64)
+    system_prompt_sha256: str = Field(min_length=64, max_length=64)
+    response_schema_sha256: str = Field(min_length=64, max_length=64)
 
 
 class ModelUsage(BaseModel):
@@ -924,7 +953,13 @@ class ModelCall(BaseModel):
     model: str
     prompt_version: str
     request_sha256: str
+    request_sha256_sequence: list[str] = Field(default_factory=list)
     response_sha256: str | None = None
+    audit_context: ModelAuditContext | None = None
+    repair_count: int = Field(default=0, ge=0)
+    provider_request_id: str | None = None
+    finish_reason: str | None = None
+    endpoint_origin: str | None = None
     status: str
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime | None = None

@@ -12,6 +12,7 @@ from assessment_workbench.domain import (
     ArbitrationAction,
     ArbitrationDecision,
     BlueprintDraft,
+    ContextPack,
     CoverageTarget,
     DifficultyDistribution,
     ExamArbitrationAction,
@@ -349,10 +350,11 @@ async def test_parent_manifest_exposes_child_run_before_writer_finishes(tmp_path
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()
     artifacts = ArtifactStore(workspace)
+    runs = RunStore(workspace)
     workflow = ExamAgentWorkflow(
         ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
         artifacts,
-        RunStore(workspace),
+        runs,
     )
     parent_ids: list[str] = []
 
@@ -772,10 +774,11 @@ async def test_exam_arbitration_regenerates_only_target_section(tmp_path: Path) 
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()
     artifacts = ArtifactStore(workspace)
+    runs = RunStore(workspace)
     workflow = ExamAgentWorkflow(
         ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
         artifacts,
-        RunStore(workspace),
+        runs,
     )
 
     run, state = await workflow.execute(
@@ -802,3 +805,14 @@ async def test_exam_arbitration_regenerates_only_target_section(tmp_path: Path) 
     records = state["question_runs"]
     assert len(records[0]["replacement_history"]) == 1
     assert records[1].get("replacement_history", []) == []
+    context_artifacts = [
+        artifact
+        for child_run in runs.list_runs()
+        for artifact in artifacts.list(child_run.id)
+        if artifact.logical_name == "model-context.json"
+    ]
+    assert len(context_artifacts) == sum(standard.calls.values()) + sum(strong.calls.values())
+    assert all(
+        ContextPack.model_validate(artifacts.read_json(artifact.id))
+        for artifact in context_artifacts
+    )

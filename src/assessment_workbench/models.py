@@ -3,15 +3,18 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from assessment_workbench.domain import ModelCall, ModelUsage
+from assessment_workbench.domain import ModelAuditContext, ModelCall, ModelUsage
+from assessment_workbench.model_contracts import canonical_json_sha256, strict_json_schema
 from assessment_workbench.ports import ModelAuditStore
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
+_strict_schema = strict_json_schema
 
 
 class OpenAICompatibleModel:
@@ -43,6 +46,7 @@ class OpenAICompatibleModel:
         response_model: type[ResponseT],
         prompt_version: str,
         run_id: str | None = None,
+        audit_context: ModelAuditContext | None = None,
     ) -> ResponseT:
         if not self.api_key:
             raise RuntimeError("AW_LLM_API_KEY is required for LLM knowledge extraction")
@@ -62,12 +66,16 @@ class OpenAICompatibleModel:
             },
             "temperature": 0,
         }
+        request_sha256 = _sha(request)
         call = ModelCall(
             run_id=UUID(run_id) if run_id else None,
             role=role,
             model=self.model,
             prompt_version=prompt_version,
-            request_sha256=_sha(request),
+            request_sha256=request_sha256,
+            request_sha256_sequence=[request_sha256],
+            audit_context=audit_context,
+            endpoint_origin=_endpoint_origin(self.base_url),
             status="running",
         )
         self.audit_store.save_model_call(call)
@@ -91,12 +99,19 @@ class OpenAICompatibleModel:
                         ),
                     },
                 ]
+                call.repair_count += 1
+                call.request_sha256_sequence.append(_sha(repair_request))
                 payload = await self._post(repair_request)
                 content = _response_content(payload)
                 result = response_model.model_validate_json(content)
             usage = payload.get("usage", {})
             call.status = "succeeded"
             call.response_sha256 = hashlib.sha256(content.encode()).hexdigest()
+            provider_request_id = payload.get("id")
+            call.provider_request_id = (
+                provider_request_id if isinstance(provider_request_id, str) else None
+            )
+            call.finish_reason = _finish_reason(payload)
             call.usage = ModelUsage.model_validate(usage)
             call.completed_at = datetime.now(UTC)
             self.audit_store.save_model_call(call)
@@ -142,8 +157,7 @@ class OpenAICompatibleModel:
 
 
 def _sha(payload: dict[str, Any]) -> str:
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode()).hexdigest()
+    return canonical_json_sha256(payload)
 
 
 def _response_content(payload: dict[str, Any]) -> str:
@@ -153,30 +167,16 @@ def _response_content(payload: dict[str, Any]) -> str:
     return content
 
 
-def _strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(schema)
-    properties = normalized.get("properties")
-    if isinstance(properties, dict):
-        normalized["additionalProperties"] = False
-        normalized["required"] = list(properties)
-        normalized["properties"] = {
-            key: _strict_schema(value) if isinstance(value, dict) else value
-            for key, value in properties.items()
-        }
-    for key in ("$defs", "definitions"):
-        definitions = normalized.get(key)
-        if isinstance(definitions, dict):
-            normalized[key] = {
-                name: _strict_schema(value) if isinstance(value, dict) else value
-                for name, value in definitions.items()
-            }
-    items = normalized.get("items")
-    if isinstance(items, dict):
-        normalized["items"] = _strict_schema(items)
-    for key in ("anyOf", "oneOf", "allOf"):
-        variants = normalized.get(key)
-        if isinstance(variants, list):
-            normalized[key] = [
-                _strict_schema(value) if isinstance(value, dict) else value for value in variants
-            ]
-    return normalized
+def _finish_reason(payload: dict[str, Any]) -> str | None:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    finish_reason = choices[0].get("finish_reason")
+    return finish_reason if isinstance(finish_reason, str) else None
+
+
+def _endpoint_origin(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return base_url
+    return f"{parsed.scheme}://{parsed.netloc}"
