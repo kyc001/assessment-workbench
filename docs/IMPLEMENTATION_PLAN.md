@@ -431,9 +431,9 @@ uv run assessment-workbench --help
 
 ## M7.1 文档抽象
 
-- [ ] 定义 `ExamDocument/ExamSection/ExamQuestion` AST。
-- [ ] 题干、答案、Rubric、图片、表格和公式使用结构化 block。
-- [ ] JSON 是事实来源，Renderer 不反向修改领域对象。
+- [x] 定义 `ExamDocument` 与逐题 Question/Solution/Rubric Bundle 领域结构。
+- [x] 题干、答案、Rubric 和公式使用结构化 content block。
+- [x] JSON 是事实来源，Renderer 不反向修改领域对象。
 
 ## M7.2 Renderer
 
@@ -442,7 +442,7 @@ uv run assessment-workbench --help
 - [ ] JSON Renderer。
 - [ ] 领域定制 Renderer 作为独立可选模板。 
 - [x] 支持题目版、答案版和评分标准版。
-- [ ] 模板版本写入产物元数据；当前由 Renderer 常量暴露。
+- [x] Renderer/模板、Compiler 和 Inspector 版本写入文档输入签名。
 
 ## M7.3 校验、编译和修复
 
@@ -450,9 +450,9 @@ uv run assessment-workbench --help
 - [x] 本地 Tectonic Compiler 适配器。
 - [ ] 远程异步 Compiler 适配器，参考 Latex Server 协议但独立实现。
 - [ ] 编译日志语义解析和细分错误分类；当前保留规范化完整日志。
-- [x] `LATEX_FORMATTING/PDF_COMPILING`；独立 `FORMAT_CHECKING` 阶段仍待拆分。
+- [x] 三视图分别执行 `DOCUMENT_RENDERING/PDF_COMPILING/PDF_INSPECTING` child run。
 - [ ] `TEMPLATE_FIXING` 只修排版，不重新命题。
-- [ ] PDF 页面渲染和基础视觉回归。
+- [x] Poppler 全页 PNG、文本层、A4、空白/边缘风险和视图语义门禁。
 
 完成定义：
 

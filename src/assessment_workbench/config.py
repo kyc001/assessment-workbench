@@ -21,3 +21,8 @@ class Settings(BaseSettings):
     exam_review_rounds: int = 3
     tectonic_command: str = "tectonic"
     tectonic_timeout: float = 120.0
+    pdfinfo_command: str = "pdfinfo"
+    pdftotext_command: str = "pdftotext"
+    pdftoppm_command: str = "pdftoppm"
+    pdf_inspection_timeout: float = 120.0
+    pdf_raster_dpi: int = 144

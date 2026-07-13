@@ -21,6 +21,8 @@
 - 版本化 Prompt Registry 与科目能力包，已注册科目可锁定结构，未知科目由 Agent 动态规划
 - 单题 Writer/Solver/Rubric 阶段可恢复，Reviewer 独立并行运行并只重试失败项
 - 整卷审核绑定全部题目版本，仲裁只重跑命中的题目或分区并保留替换历史
+- 题目卷、答案卷和 Rubric 独立编译、全页检查并只重试失败视图
+- 发布 Bundle 绑定内容、模型审计、审核仲裁、PDF、日志、页面图片和人工验收
 - 轻量关键词检索和一层知识图谱扩展
 - 从知识点标签生成带来源上下文的 `QuestionSpec`
 - 为 LightRAG、RAG-Anything 等后端预留端口，但默认不安装
@@ -66,6 +68,30 @@ uv run assessment-workbench questions plan \
 
 uv run assessment-workbench runs list --workspace ./workspaces/demo
 ```
+
+整卷生成启用 human gates 时会先审批内容，再在三份 PDF 全页渲染后等待页面验收：
+
+```bash
+uv run assessment-workbench exams generate \
+  --subject 高考数学 \
+  --target-level 高考 \
+  --requirements "19 题，150 分，标准模拟卷" \
+  --workspace ./workspaces/gaokao
+
+uv run assessment-workbench exams document-status \
+  --parent-run <run-id> \
+  --workspace ./workspaces/gaokao
+```
+
+人工修改 `editable/<parent-run>/questions/NN.json` 后，可创建新的组卷运行；它复用同一三视图构建与 PDF 门禁，不调用模型：
+
+```bash
+uv run assessment-workbench exams assemble-edited \
+  --parent-run <parent-run-id> \
+  --workspace ./workspaces/gaokao
+```
+
+为 edited assembly 增加 `--human-gates` 时，工作流会在全部页面 Artifact 生成后暂停；批准并恢复后，发布 Bundle 才会标记为 `human_verified`。
 
 PowerShell 中可将多行命令改成单行执行。
 

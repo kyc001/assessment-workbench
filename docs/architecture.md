@@ -124,6 +124,25 @@ Blueprint 的宏观覆盖桶与细粒度 `topic_tags` 分离。每个 QuestionPl
 
 `REBALANCE_DIFFICULTY` 和 `REBALANCE_COVERAGE` 先只修订目标 QuestionPlan，再进入相同的局部题目生成路径。合并器要求返回的 slot 集合与目标完全一致，非目标计划保持不变。整卷重试预算耗尽或 Reviewer 无法完成时保留最新 Exam 和审核 Artifact，并进入人工审批。
 
+## 文档构建、页面门禁与发布
+
+`ExamDocument` 和逐题 Bundle 是内容事实来源，LaTeX、PDF、日志和页面图片都是可重建产物。题目卷、答案卷和评分标准不再由一个同步导出循环处理，而是分别运行独立 `exam_document_build` child：
+
+```text
+DOCUMENTS_BUILDING
+  -> questions: DOCUMENT_RENDERING -> PDF_COMPILING -> PDF_INSPECTING
+  -> solutions: DOCUMENT_RENDERING -> PDF_COMPILING -> PDF_INSPECTING
+  -> rubric:    DOCUMENT_RENDERING -> PDF_COMPILING -> PDF_INSPECTING
+  -> DOCUMENT_APPROVAL
+  -> RELEASE_BUNDLING
+```
+
+每个 child 先提交已校验 TeX，再调用 Tectonic。编译失败仍保存 TeX 和失败日志；兄弟视图继续执行。父运行的 `document-build-runs.json` 同时维护 editable 实时投影和不可变快照，输入签名一致且 Artifact 完整的成功视图在恢复时复用，只重跑失败、缺失或过期视图。
+
+Poppler Inspector 使用 `pdfinfo`、`pdftotext` 和 `pdftoppm` 检查页数、A4 尺寸、文本层、连续题号、分区与视图专属标签，并把全部页面写成 PNG Artifact。灰度页只用于发现空白页和内容贴边风险。机器报告明确保留重叠、公式可读性、内容与推导正确性等人工检查项；启用 human gates 时，全部页面批准后才写 `document-acceptance.json`。
+
+`exam-release-bundle.json` 是发布入口。它以 Artifact ID 和 SHA-256 绑定 Exam、全部逐题 Bundle、审核仲裁、ContextPack/ModelCall、三视图 TeX/PDF/日志、检查报告、页面图片和人工验收。发布前重新读取每个 Artifact 验证哈希；缺引用、失败视图或未完成的人工门禁都会拒绝发布。无 Compiler/Inspector 的内容模式可以完成到 `ExamDocument`，但不会生成发布 Bundle。
+
 ## Artifact 与阶段提交事务
 
 Artifact 发布使用 SQLite `BEGIN IMMEDIATE` 串行化同 workspace 的版本分配。临时文件完成 flush/fsync 后原子替换到版本路径，随后在同一数据库临界区插入元数据并提交；insert 或 commit 失败会 rollback 并删除本次 final 文件。若进程在文件替换后直接终止，数据库不会暴露未提交行，下一次相同 logical name 会分配同一 version 并覆盖孤立文件；`reconcile` 只清理可识别的临时文件和未被数据库引用的 `.vN` 文件。

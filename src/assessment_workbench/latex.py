@@ -1,19 +1,11 @@
-from enum import StrEnum
-
 from assessment_workbench.domain import (
     ExamContentBlock,
     ExamContentKind,
     ExamDocument,
     ExamQuestionBundle,
+    ExamView,
     QuestionType,
 )
-
-
-class ExamView(StrEnum):
-    QUESTIONS = "questions"
-    SOLUTIONS = "solutions"
-    RUBRIC = "rubric"
-
 
 _EXAM_LAYOUT_COMMANDS = r"""
 \newcommand{\awsection}[1]{%

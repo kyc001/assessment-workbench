@@ -9,6 +9,15 @@ from assessment_workbench.capabilities import (
     load_default_capability_catalog,
 )
 from assessment_workbench.compilers import LatexCompiler
+from assessment_workbench.document_workflow import (
+    DOCUMENTS_BUILDING,
+    DocumentBatchWorkflow,
+    DocumentBuildWorkflow,
+    document_artifact_ids,
+    latest_document_builds,
+    parse_document_build_records,
+    successful_document_builds,
+)
 from assessment_workbench.domain import (
     ArtifactRef,
     BlueprintDraft,
@@ -38,13 +47,14 @@ from assessment_workbench.exam_quality import (
 )
 from assessment_workbench.exam_review_workflow import parse_exam_review_records
 from assessment_workbench.exam_workflow import ExamQualityWorkflow
-from assessment_workbench.latex_service import ExamLatexService
+from assessment_workbench.pdf_inspection import PdfInspector
 from assessment_workbench.prompting import (
     complete_with_prompt,
     context_artifact_ids,
     json_prompt,
 )
 from assessment_workbench.question_workflow import ModelRouter, QuestionAgentWorkflow
+from assessment_workbench.release import DOCUMENT_APPROVAL, RELEASE_BUNDLING, ReleaseBundleBuilder
 from assessment_workbench.storage import ArtifactStore, RunStore
 from assessment_workbench.workflow import Step, WorkflowEngine
 
@@ -66,6 +76,7 @@ class ExamAgentWorkflow:
         max_exam_review_rounds: int = 3,
         max_parallel_questions: int = 1,
         compiler: LatexCompiler | None = None,
+        pdf_inspector: PdfInspector | None = None,
         capability_catalog: CapabilityCatalog | None = None,
     ) -> None:
         if max_question_attempts < 1:
@@ -85,6 +96,7 @@ class ExamAgentWorkflow:
         self.max_draft_validation_attempts = max_draft_validation_attempts
         self.max_parallel_questions = max_parallel_questions
         self.compiler = compiler
+        self.pdf_inspector = pdf_inspector
         self.capabilities = capability_catalog or load_default_capability_catalog()
         self.prompts = self.capabilities.prompts
         self.question_workflow = QuestionAgentWorkflow(
@@ -107,6 +119,16 @@ class ExamAgentWorkflow:
             max_review_rounds=max_exam_review_rounds,
             max_draft_validation_attempts=max_draft_validation_attempts,
         )
+        self.document_batch = (
+            DocumentBatchWorkflow(
+                DocumentBuildWorkflow(compiler, pdf_inspector, artifacts, runs),
+                artifacts,
+                runs,
+            )
+            if compiler is not None and pdf_inspector is not None
+            else None
+        )
+        self.release_builder = ReleaseBundleBuilder(artifacts, runs)
 
     async def execute(
         self,
@@ -805,43 +827,150 @@ class ExamAgentWorkflow:
                 }
             }
 
-        async def export(state: dict[str, Any]) -> dict[str, Any]:
+        async def build_documents(state: dict[str, Any]) -> dict[str, Any]:
+            if self.document_batch is None:
+                return {"document_builds": [], "document_build_records": []}
             exam: ExamDocument = state["exam"]
-            latex_service = ExamLatexService(compiler=self.compiler)
-            outputs = list(state["artifacts"])
-            for document in latex_service.build(exam):
-                view = document.view
-                source = document.source
-                outputs.append(
-                    self.artifacts.write_bytes(
-                        state["run_id"],
-                        f"exam-{view.value}.tex",
-                        source.encode("utf-8"),
-                        media_type="application/x-tex",
-                        created_by_phase="LATEX_FORMATTING",
-                    )
+            restored_records = state.get("document_build_records")
+            if restored_records is None:
+                latest = self.artifacts.latest(state["run_id"], "document-build-runs.json")
+                if latest is not None:
+                    restored_records = self.artifacts.read_json(latest.id)
+            outcome = await self.document_batch.execute(
+                state["run_id"],
+                exam,
+                restored_records,
+                input_artifact_ids=context_artifact_ids(state),
+            )
+            output_ids = [
+                outcome.manifest_artifact.id,
+                *(
+                    artifact_id
+                    for record in outcome.current
+                    for artifact_id in document_artifact_ids(record)
+                ),
+            ]
+            updates: dict[str, Any] = {
+                "document_build_records": outcome.records,
+                "document_builds": outcome.current,
+                "document_manifest_artifact": outcome.manifest_artifact,
+                "output_artifact_ids": output_ids,
+                "_checkpoint_artifacts": {
+                    "document_manifest": outcome.manifest_artifact.id,
+                },
+                "_checkpoint_child_run_ids": outcome.child_run_ids,
+            }
+            if not outcome.succeeded:
+                failed = [
+                    record.view.value
+                    for record in outcome.current
+                    if record.status is not RunStatus.SUCCEEDED
+                ]
+                updates["_human_review"] = {
+                    "prompt": (
+                        "Document views failed machine gates. Inspect the manifest and retry "
+                        f"only the failed views: {', '.join(failed)}."
+                    ),
+                    "artifact_ids": output_ids,
+                    "resume_phase": DOCUMENTS_BUILDING,
+                    "retry_phase": DOCUMENTS_BUILDING,
+                }
+            return updates
+
+        async def approve_documents(state: dict[str, Any]) -> dict[str, Any]:
+            if self.document_batch is None:
+                return {}
+            if not request.require_exam_approval:
+                return {}
+            manifest = state.get("document_manifest_artifact")
+            builds = state.get("document_builds", [])
+            if not isinstance(manifest, ArtifactRef) or not successful_document_builds(builds):
+                raise ValueError("document approval requires a successful build manifest")
+            return {
+                "_human_review": {
+                    "prompt": (
+                        "Review every rendered page for clipping, overlap, labels, Chinese text, "
+                        "mathematical notation, question content, solutions, and rubric scoring."
+                    ),
+                    "artifact_ids": [
+                        manifest.id,
+                        *(
+                            artifact_id
+                            for record in builds
+                            for artifact_id in document_artifact_ids(record)
+                        ),
+                    ],
+                    "retry_phase": DOCUMENTS_BUILDING,
+                }
+            }
+
+        async def release_documents(state: dict[str, Any]) -> dict[str, Any]:
+            if self.document_batch is None:
+                artifacts = [
+                    artifact
+                    for artifact in state.get("artifacts", [])
+                    if isinstance(artifact, ArtifactRef)
+                ]
+                return {
+                    "artifacts": artifacts,
+                    "output_artifact_ids": [artifact.id for artifact in artifacts],
+                }
+            exam: ExamDocument = state["exam"]
+            builds = state.get("document_builds", [])
+            manifest = state.get("document_manifest_artifact")
+            if not isinstance(manifest, ArtifactRef) or not successful_document_builds(builds):
+                raise ValueError("release requires successful document builds")
+            acceptance: ArtifactRef | None = None
+            if request.require_exam_approval:
+                acceptance = self.release_builder.write_acceptance(
+                    state["run_id"],
+                    manifest_artifact_id=manifest.id,
+                    document_builds=builds,
                 )
-                if document.compile_result is not None:
-                    result = document.compile_result
-                    outputs.append(
-                        self.artifacts.write_bytes(
-                            state["run_id"],
-                            f"exam-{view.value}.pdf",
-                            result.pdf,
-                            media_type="application/pdf",
-                            created_by_phase="PDF_COMPILING",
-                        )
-                    )
-                    outputs.append(
-                        self.artifacts.write_bytes(
-                            state["run_id"],
-                            f"exam-{view.value}.tectonic.log",
-                            result.log.encode("utf-8"),
-                            media_type="text/plain",
-                            created_by_phase="PDF_COMPILING",
-                        )
-                    )
-            return {"artifacts": outputs, "output_artifact_ids": [item.id for item in outputs]}
+            bindings = state.get("_checkpoint_artifacts", {})
+            exam_artifact_id = bindings.get("exam")
+            if not isinstance(exam_artifact_id, UUID):
+                raise ValueError("release requires the ExamDocument artifact binding")
+            question_bundle_artifact_ids = _question_bundle_artifact_ids(
+                state.get("question_runs"),
+                expected=len(exam.questions),
+            )
+            bundle, bundle_artifact = self.release_builder.build(
+                state["run_id"],
+                exam,
+                exam_artifact_id=exam_artifact_id,
+                question_bundle_artifact_ids=question_bundle_artifact_ids,
+                document_builds=builds,
+                acceptance_artifact_id=acceptance.id if acceptance is not None else None,
+            )
+            artifact_ids = [
+                exam_artifact_id,
+                manifest.id,
+                *(
+                    artifact_id
+                    for record in builds
+                    for artifact_id in document_artifact_ids(record)
+                ),
+                acceptance.id if acceptance is not None else None,
+                bundle_artifact.id,
+            ]
+            output_artifacts = [
+                artifact
+                for artifact_id in artifact_ids
+                if artifact_id is not None
+                for artifact in [self.artifacts.get(artifact_id)]
+                if artifact is not None
+            ]
+            checkpoint_updates = {"release_bundle": bundle_artifact.id}
+            if acceptance is not None:
+                checkpoint_updates["document_acceptance"] = acceptance.id
+            return {
+                "release_bundle": bundle,
+                "release_bundle_artifact": bundle_artifact,
+                "artifacts": output_artifacts,
+                "output_artifact_ids": [artifact.id for artifact in output_artifacts],
+                "_checkpoint_artifacts": checkpoint_updates,
+            }
 
         steps: list[tuple[str, Step]] = [
             ("SUBJECT_RESEARCHING", research_subject),
@@ -855,7 +984,9 @@ class ExamAgentWorkflow:
             ("EXAM_ARBITRATING", arbitrate_exam),
             ("EXAM_FINALIZING", finalize_exam),
             ("EXAM_APPROVAL", approve_exam),
-            ("LATEX_FORMATTING", export),
+            (DOCUMENTS_BUILDING, build_documents),
+            (DOCUMENT_APPROVAL, approve_documents),
+            (RELEASE_BUNDLING, release_documents),
         ]
         if resume_run_id is not None:
             return await self.engine.resume(
@@ -913,6 +1044,16 @@ class ExamAgentWorkflow:
             if exam_artifact is None:
                 raise ValueError(f"exam artifact metadata is missing: {exam_artifact_id}")
             state["artifacts"] = [exam_artifact]
+        document_manifest = payload("document_manifest")
+        if document_manifest is not None:
+            records = parse_document_build_records(document_manifest)
+            state["document_build_records"] = records
+            state["document_builds"] = latest_document_builds(records)
+            manifest_id = checkpoint.artifact_bindings["document_manifest"]
+            manifest_artifact = self.artifacts.get(manifest_id)
+            if manifest_artifact is None:
+                raise ValueError(f"document manifest metadata is missing: {manifest_id}")
+            state["document_manifest_artifact"] = manifest_artifact
         exam_state_payload = payload("exam_workflow_state")
         if exam_state_payload is not None:
             state["exam_workflow_state"] = ExamWorkflowState.model_validate(exam_state_payload)
@@ -963,6 +1104,25 @@ class ExamAgentWorkflow:
 
     async def resume_question_run(self, run_id: UUID) -> tuple[WorkflowRun, dict[str, Any]]:
         return await self.question_workflow.resume(run_id)
+
+
+def _question_bundle_artifact_ids(payload: object, *, expected: int) -> list[UUID]:
+    if not isinstance(payload, list):
+        raise ValueError("release requires the question run manifest")
+    by_number: dict[int, UUID] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            number = int(item["question_number"])
+            artifact_id = UUID(str(item["bundle_artifact_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if item.get("status") in {RunStatus.SUCCEEDED, RunStatus.SUCCEEDED.value}:
+            by_number[number] = artifact_id
+    if sorted(by_number) != list(range(1, expected + 1)):
+        raise ValueError("release requires one successful Bundle artifact per question")
+    return [by_number[number] for number in range(1, expected + 1)]
 
 
 def _blueprint_slots(blueprint: ExamBlueprint) -> list[QuestionSlot]:

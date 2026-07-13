@@ -9,8 +9,14 @@ import typer
 from assessment_workbench.agents import ExamAgentWorkflow, ModelRouter
 from assessment_workbench.compilers import TectonicCompiler
 from assessment_workbench.config import Settings
+from assessment_workbench.document_workflow import (
+    DocumentBatchWorkflow,
+    DocumentBuildWorkflow,
+    latest_document_builds,
+)
 from assessment_workbench.domain import (
     ArtifactRef,
+    DocumentBuildRunRecord,
     ExamBlueprint,
     ExamDocument,
     ExamQuestionBundle,
@@ -22,10 +28,11 @@ from assessment_workbench.domain import (
     RunStatus,
     SubjectProfile,
 )
+from assessment_workbench.edited_exam_workflow import EditedExamAssemblyWorkflow
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
-from assessment_workbench.latex_service import ExamLatexService
 from assessment_workbench.models import OpenAICompatibleModel
 from assessment_workbench.parsers import FixtureParser, MinerUApiParser, MinerUCliParser
+from assessment_workbench.pdf_inspection import PopplerPdfInspector
 from assessment_workbench.planning import QuestionSpecWorkflow
 from assessment_workbench.ports import DocumentParser
 from assessment_workbench.profiles import load_exam_blueprint, load_subject_profile
@@ -36,7 +43,6 @@ from assessment_workbench.storage import (
     RunStore,
     Workspace,
 )
-from assessment_workbench.workflow import WorkflowEngine
 
 app = typer.Typer(help="Course-grounded assessment workflows")
 workspace_app = typer.Typer(help="Initialize and inspect workspaces")
@@ -89,10 +95,18 @@ def _exam_workflow(
             max_concurrency=settings.llm_request_concurrency,
         )
     compiler = None
+    inspector = None
     if compile_pdf:
         compiler = TectonicCompiler(
             settings.tectonic_command,
             timeout_seconds=settings.tectonic_timeout,
+        )
+        inspector = PopplerPdfInspector(
+            pdfinfo_command=settings.pdfinfo_command,
+            pdftotext_command=settings.pdftotext_command,
+            pdftoppm_command=settings.pdftoppm_command,
+            timeout_seconds=settings.pdf_inspection_timeout,
+            raster_dpi=settings.pdf_raster_dpi,
         )
     return ExamAgentWorkflow(
         ModelRouter(standard=standard, strong=strong),
@@ -102,7 +116,33 @@ def _exam_workflow(
         max_exam_review_rounds=settings.exam_review_rounds,
         max_parallel_questions=settings.exam_question_concurrency,
         compiler=compiler,
+        pdf_inspector=inspector,
     )
+
+
+def _edited_exam_workflow(
+    workspace: Workspace,
+    settings: Settings,
+) -> EditedExamAssemblyWorkflow:
+    artifacts = ArtifactStore(workspace)
+    runs = RunStore(workspace)
+    compiler = TectonicCompiler(
+        settings.tectonic_command,
+        timeout_seconds=settings.tectonic_timeout,
+    )
+    inspector = PopplerPdfInspector(
+        pdfinfo_command=settings.pdfinfo_command,
+        pdftotext_command=settings.pdftotext_command,
+        pdftoppm_command=settings.pdftoppm_command,
+        timeout_seconds=settings.pdf_inspection_timeout,
+        raster_dpi=settings.pdf_raster_dpi,
+    )
+    documents = DocumentBatchWorkflow(
+        DocumentBuildWorkflow(compiler, inspector, artifacts, runs),
+        artifacts,
+        runs,
+    )
+    return EditedExamAssemblyWorkflow(documents, artifacts, runs)
 
 
 def _latest_artifact_json(
@@ -114,6 +154,17 @@ def _latest_artifact_json(
     if latest is None:
         raise KeyError(f"artifact not found for run {run_id}: {logical_name}")
     return artifacts.read_json(latest.id)
+
+
+def _artifact_display_path(
+    workspace: Workspace,
+    artifacts: ArtifactStore,
+    artifact_id: UUID | None,
+) -> str:
+    if artifact_id is None:
+        return "-"
+    artifact = artifacts.get(artifact_id)
+    return str(workspace.root / artifact.path) if artifact is not None else "<missing>"
 
 
 def _echo_human_review(run_id: UUID, store: RunStore) -> None:
@@ -365,6 +416,10 @@ def resume_run(
             resumed, state = asyncio.run(workflow.resume(run_id))
         elif run.workflow == "exam_question_generation":
             resumed, state = asyncio.run(workflow.resume_question_run(run_id))
+        elif run.workflow == "exam_edited_assembly":
+            resumed, state = asyncio.run(
+                _edited_exam_workflow(workspace, Settings()).resume(run_id)
+            )
         else:
             raise ValueError(f"workflow does not have a registered resume handler: {run.workflow}")
     except (KeyError, OSError, ValueError) as exc:
@@ -379,7 +434,7 @@ def resume_run(
     if resumed.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {resumed.error or 'workflow ended without success'}", err=True)
         raise typer.Exit(1)
-    if resumed.workflow == "exam_agent_generation":
+    if resumed.workflow in {"exam_agent_generation", "exam_edited_assembly"}:
         exam = state.get("exam")
         if isinstance(exam, ExamDocument):
             typer.echo(f"Questions: {len(exam.questions)}")
@@ -577,6 +632,45 @@ def show_exam_question_status(
     typer.echo(f"Summary: {summary}")
 
 
+@exams_app.command("document-status")
+def show_exam_document_status(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    artifacts = ArtifactStore(workspace)
+    live_path = workspace.root / "editable" / str(parent_run_id) / "document-build-runs.json"
+    try:
+        if live_path.is_file():
+            payload = json.loads(live_path.read_text(encoding="utf-8"))
+        else:
+            payload = _latest_artifact_json(artifacts, parent_run_id, "document-build-runs.json")
+        if not isinstance(payload, list):
+            raise ValueError("document build manifest is not a list")
+        records = [DocumentBuildRunRecord.model_validate(item) for item in payload]
+    except (KeyError, OSError, ValueError) as exc:
+        raise typer.BadParameter(f"document build manifest is unavailable: {exc}") from exc
+    latest = {record.view.value: record for record in latest_document_builds(records)}
+    typer.echo("VIEW\tSTATUS\tATTEMPT\tCHILD_RUN\tPDF\tINSPECTION\tERROR")
+    for view in ("questions", "solutions", "rubric"):
+        latest_record = latest.get(view)
+        if latest_record is None:
+            typer.echo(f"{view}\tqueued\t-\t-\t-\t-\t-")
+            continue
+        pdf = _artifact_display_path(workspace, artifacts, latest_record.pdf_artifact_id)
+        inspection = _artifact_display_path(
+            workspace,
+            artifacts,
+            latest_record.inspection_artifact_id,
+        )
+        error = (latest_record.error or "").replace("\n", " ")
+        typer.echo(
+            f"{view}\t{latest_record.status}\t{latest_record.attempt}\t"
+            f"{latest_record.run_id}\t"
+            f"{pdf}\t{inspection}\t{error}"
+        )
+
+
 @exams_app.command("generate-question")
 def generate_exam_question(
     parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
@@ -668,6 +762,13 @@ def generate_exam_question(
 @exams_app.command("assemble-edited")
 def assemble_edited_exam(
     parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    human_gates: Annotated[
+        bool,
+        typer.Option(
+            "--human-gates/--no-human-gates",
+            help="Pause for full-page visual approval before publishing",
+        ),
+    ] = False,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     workspace = _workspace(workspace_path)
@@ -702,69 +803,18 @@ def assemble_edited_exam(
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"editable question validation failed: {exc}") from exc
 
-    async def assemble_step(state: dict[str, Any]) -> dict[str, Any]:
-        run_id = state["run_id"]
-        outputs = [
-            artifacts.write_json(
-                run_id,
-                "exam.json",
-                exam.model_dump(mode="json"),
-                created_by_phase="EDITED_EXAM_ASSEMBLING",
-            )
-        ]
-        settings = Settings()
-        compiler = TectonicCompiler(
-            settings.tectonic_command,
-            timeout_seconds=settings.tectonic_timeout,
-        )
-        latex_service = ExamLatexService(compiler=compiler)
-        for document in latex_service.build(exam):
-            view = document.view
-            source = document.source
-            outputs.append(
-                artifacts.write_bytes(
-                    run_id,
-                    f"exam-{view.value}.tex",
-                    source.encode("utf-8"),
-                    media_type="application/x-tex",
-                    created_by_phase="EDITED_LATEX_FORMATTING",
-                )
-            )
-            assert document.compile_result is not None
-            result = document.compile_result
-            outputs.append(
-                artifacts.write_bytes(
-                    run_id,
-                    f"exam-{view.value}.pdf",
-                    result.pdf,
-                    media_type="application/pdf",
-                    created_by_phase="EDITED_PDF_COMPILING",
-                )
-            )
-            outputs.append(
-                artifacts.write_bytes(
-                    run_id,
-                    f"exam-{view.value}.tectonic.log",
-                    result.log.encode("utf-8"),
-                    media_type="text/plain",
-                    created_by_phase="EDITED_PDF_COMPILING",
-                )
-            )
-        return {
-            "exam": exam,
-            "artifacts": outputs,
-            "output_artifact_ids": [artifact.id for artifact in outputs],
-        }
-
     assembly_run, state = asyncio.run(
-        WorkflowEngine(RunStore(workspace)).execute(
-            "exam_edited_assembly",
-            [("EDITED_EXAM_ASSEMBLING", assemble_step)],
-            parent_run_id=parent_run_id,
+        _edited_exam_workflow(workspace, Settings()).execute(
+            exam,
+            source_parent_run_id=parent_run_id,
+            require_document_approval=human_gates,
             on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
         )
     )
     typer.echo(f"Status: {assembly_run.status}")
+    if assembly_run.status is RunStatus.WAITING_HUMAN:
+        _echo_human_review(assembly_run.id, RunStore(workspace))
+        return
     if assembly_run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {assembly_run.error or 'edited assembly failed'}", err=True)
         raise typer.Exit(1)

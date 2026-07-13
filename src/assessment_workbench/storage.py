@@ -328,6 +328,50 @@ class RunStore:
             ).fetchall()
         return [_event_from_row(row) for row in rows]
 
+    def descendant_run_ids(self, root_run_id: UUID) -> list[UUID]:
+        discovered: list[UUID] = []
+        seen = {root_run_id}
+        frontier = [root_run_id]
+        with self.workspace.connect() as connection:
+            while frontier:
+                placeholders = ",".join("?" for _ in frontier)
+                rows = connection.execute(
+                    f"""SELECT DISTINCT run_id FROM phase_events
+                    WHERE parent_run_id IN ({placeholders}) ORDER BY run_id""",  # noqa: S608
+                    tuple(str(run_id) for run_id in frontier),
+                ).fetchall()
+                next_frontier: list[UUID] = []
+                for row in rows:
+                    run_id = UUID(str(row["run_id"]))
+                    if run_id in seen:
+                        continue
+                    seen.add(run_id)
+                    discovered.append(run_id)
+                    next_frontier.append(run_id)
+                frontier = next_frontier
+        return discovered
+
+    def model_calls(self, run_ids: list[UUID]) -> list[ModelCall]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" for _ in run_ids)
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT payload FROM model_calls
+                WHERE run_id IN ({placeholders}) ORDER BY started_at, id""",  # noqa: S608
+                tuple(str(run_id) for run_id in run_ids),
+            ).fetchall()
+        return [ModelCall.model_validate_json(row["payload"]) for row in rows]
+
+    def latest_human_decision(self, run_id: UUID) -> HumanDecision | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                """SELECT payload FROM human_decisions
+                WHERE run_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (str(run_id),),
+            ).fetchone()
+        return HumanDecision.model_validate_json(row["payload"]) if row else None
+
 
 class MaterialStore:
     def __init__(self, workspace: Workspace) -> None:

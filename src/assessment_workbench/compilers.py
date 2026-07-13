@@ -21,7 +21,9 @@ class LatexCompiler(Protocol):
 
 
 class LatexCompileError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, log: str = "") -> None:
+        super().__init__(message)
+        self.log = log
 
 
 _BLOCKING_LATEX_DIAGNOSTICS = (
@@ -36,6 +38,9 @@ _BLOCKING_LATEX_DIAGNOSTICS = (
 
 
 class TectonicCompiler:
+    name = "tectonic"
+    version = "v1"
+
     def __init__(self, executable: str = "tectonic", *, timeout_seconds: float = 120) -> None:
         self.executable = executable
         self.timeout_seconds = timeout_seconds
@@ -86,14 +91,17 @@ class TectonicCompiler:
                 ) from exc
             log = _normalize_log(completed.stdout + completed.stderr, root)
             if completed.returncode != 0:
-                raise LatexCompileError(f"LaTeX compilation failed:\n{log}")
-            validate_latex_log(log)
+                raise LatexCompileError(f"LaTeX compilation failed:\n{log}", log=log)
+            try:
+                validate_latex_log(log)
+            except LatexCompileError as exc:
+                raise LatexCompileError(str(exc), log=log) from exc
             pdf_path = output_dir / f"{job_name}.pdf"
             if not pdf_path.is_file():
-                raise LatexCompileError(f"LaTeX compiler produced no PDF:\n{log}")
+                raise LatexCompileError(f"LaTeX compiler produced no PDF:\n{log}", log=log)
             pdf = pdf_path.read_bytes()
             if not pdf.startswith(b"%PDF-"):
-                raise LatexCompileError("LaTeX compiler produced an invalid PDF")
+                raise LatexCompileError("LaTeX compiler produced an invalid PDF", log=log)
         return CompileResult(
             pdf=pdf,
             log=log,

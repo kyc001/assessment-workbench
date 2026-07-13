@@ -570,6 +570,12 @@ class ExamDocument(BaseModel):
         return self
 
 
+class ExamView(StrEnum):
+    QUESTIONS = "questions"
+    SOLUTIONS = "solutions"
+    RUBRIC = "rubric"
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1143,3 +1149,152 @@ class ArtifactRef(BaseModel):
     size_bytes: int = Field(ge=0)
     created_by_phase: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
+
+
+class DocumentBuildInputSignature(StrictModel):
+    exam_id: UUID
+    bundle_versions: ExamBundleVersionSignature
+    renderer: str = Field(min_length=1)
+    renderer_version: str = Field(min_length=1)
+    compiler: str = Field(min_length=1)
+    inspector: str = Field(min_length=1)
+    inspector_version: str = Field(min_length=1)
+
+
+class PdfPageInspection(StrictModel):
+    page_number: int = Field(ge=1)
+    width_points: float = Field(gt=0)
+    height_points: float = Field(gt=0)
+    text_characters: int = Field(ge=0)
+    ink_ratio: float = Field(ge=0, le=1)
+    edge_ink_ratio: float = Field(ge=0, le=1)
+    image_artifact_id: UUID
+
+
+class PdfInspectionReport(StrictModel):
+    view: ExamView
+    pdf_artifact_id: UUID
+    page_count: int = Field(ge=1)
+    extracted_text_sha256: str = Field(min_length=64, max_length=64)
+    pages: list[PdfPageInspection] = Field(min_length=1)
+    blocking_findings: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    manual_checks_required: list[str] = Field(min_length=1)
+    passed: bool
+
+    @model_validator(mode="after")
+    def validate_result(self) -> "PdfInspectionReport":
+        if len(self.pages) != self.page_count:
+            raise ValueError("PDF inspection page count does not match page records")
+        if self.passed == bool(self.blocking_findings):
+            raise ValueError("PDF inspection passed flag does not match blocking findings")
+        return self
+
+
+class DocumentBuildRunRecord(StrictModel):
+    view: ExamView
+    attempt: int = Field(ge=1)
+    input_signature: DocumentBuildInputSignature
+    input_signature_sha256: str = Field(min_length=64, max_length=64)
+    run_id: UUID
+    status: RunStatus
+    source_artifact_id: UUID | None = None
+    pdf_artifact_id: UUID | None = None
+    log_artifact_id: UUID | None = None
+    inspection_artifact_id: UUID | None = None
+    page_artifact_ids: list[UUID] = Field(default_factory=list)
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_outputs(self) -> "DocumentBuildRunRecord":
+        if self.status is RunStatus.SUCCEEDED:
+            required = (
+                self.source_artifact_id,
+                self.pdf_artifact_id,
+                self.log_artifact_id,
+                self.inspection_artifact_id,
+            )
+            if any(value is None for value in required) or not self.page_artifact_ids:
+                raise ValueError("succeeded document build requires all output artifacts")
+        return self
+
+
+class DocumentAcceptanceRecord(StrictModel):
+    decision_id: UUID
+    actor: str = Field(min_length=1)
+    reason: str = ""
+    manifest_artifact_id: UUID
+    page_artifact_ids: list[UUID] = Field(min_length=1)
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class ReleaseArtifactBinding(StrictModel):
+    artifact_id: UUID
+    run_id: UUID
+    logical_name: str = Field(min_length=1)
+    version: int = Field(ge=1)
+    media_type: str = Field(min_length=1)
+    sha256: str = Field(min_length=64, max_length=64)
+    size_bytes: int = Field(ge=0)
+
+
+class ReleaseLevel(StrEnum):
+    MACHINE_VERIFIED = "machine_verified"
+    HUMAN_VERIFIED = "human_verified"
+
+
+class ExamReleaseBundle(StrictModel):
+    format_version: str = "1"
+    root_run_id: UUID
+    exam_id: UUID
+    exam_signature: ExamBundleVersionSignature
+    release_level: ReleaseLevel
+    run_ids: list[UUID] = Field(min_length=1)
+    model_call_ids: list[UUID] = Field(default_factory=list)
+    exam_artifact_id: UUID
+    question_bundle_artifact_ids: list[UUID] = Field(min_length=1)
+    review_artifact_ids: list[UUID] = Field(default_factory=list)
+    arbitration_artifact_ids: list[UUID] = Field(default_factory=list)
+    context_pack_artifact_ids: list[UUID] = Field(default_factory=list)
+    document_builds: list[DocumentBuildRunRecord] = Field(min_length=3, max_length=3)
+    acceptance_artifact_id: UUID | None = None
+    artifacts: list[ReleaseArtifactBinding] = Field(min_length=1)
+    created_at: datetime = Field(default_factory=now_utc)
+
+    @model_validator(mode="after")
+    def validate_release(self) -> "ExamReleaseBundle":
+        views = [record.view for record in self.document_builds]
+        if len(set(views)) != len(ExamView) or set(views) != set(ExamView):
+            raise ValueError("release bundle requires one successful build for every exam view")
+        if any(record.status is not RunStatus.SUCCEEDED for record in self.document_builds):
+            raise ValueError("release bundle cannot contain failed document builds")
+        if self.release_level is ReleaseLevel.HUMAN_VERIFIED:
+            if self.acceptance_artifact_id is None:
+                raise ValueError("human-verified release requires an acceptance artifact")
+        elif self.acceptance_artifact_id is not None:
+            raise ValueError("machine-verified release cannot claim a human acceptance artifact")
+        artifact_ids = {binding.artifact_id for binding in self.artifacts}
+        required_ids = {
+            self.exam_artifact_id,
+            *self.question_bundle_artifact_ids,
+            *self.review_artifact_ids,
+            *self.arbitration_artifact_ids,
+            *self.context_pack_artifact_ids,
+            *(
+                artifact_id
+                for record in self.document_builds
+                for artifact_id in (
+                    record.source_artifact_id,
+                    record.log_artifact_id,
+                    record.pdf_artifact_id,
+                    *record.page_artifact_ids,
+                    record.inspection_artifact_id,
+                )
+                if artifact_id is not None
+            ),
+        }
+        if self.acceptance_artifact_id is not None:
+            required_ids.add(self.acceptance_artifact_id)
+        if not required_ids <= artifact_ids:
+            raise ValueError("release bundle contains artifact references outside its index")
+        return self
