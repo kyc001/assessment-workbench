@@ -1,12 +1,7 @@
 import asyncio
-import json
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any
 from uuid import UUID, uuid4
-
-import httpx
-from pydantic import BaseModel, ValidationError
 
 from assessment_workbench.capabilities import (
     CapabilityCatalog,
@@ -15,8 +10,6 @@ from assessment_workbench.capabilities import (
 )
 from assessment_workbench.compilers import LatexCompiler
 from assessment_workbench.domain import (
-    ArbitrationAction,
-    ArbitrationDecision,
     ArtifactRef,
     BlueprintDraft,
     ExamBlueprint,
@@ -25,46 +18,24 @@ from assessment_workbench.domain import (
     ExamPlanningMode,
     ExamPlanningRecord,
     ExamQuestionBundle,
-    FindingSeverity,
-    FindingTarget,
-    GenerationMetadata,
-    QuestionDraft,
     QuestionGenerationRequest,
     QuestionPlan,
     QuestionPlanDraft,
     QuestionPlanSetDraft,
     QuestionSlot,
-    QuestionVersion,
-    ReviewReport,
-    RubricDraft,
-    RubricVersion,
     RunStatus,
-    SolutionDraft,
-    SolutionVersion,
     SubjectProfile,
     SubjectProfileCandidate,
     WorkflowCheckpoint,
     WorkflowRun,
 )
 from assessment_workbench.latex_service import ExamLatexService
-from assessment_workbench.ports import StructuredModel
-from assessment_workbench.prompting import PromptBundle
+from assessment_workbench.prompting import complete_with_prompt, json_prompt
+from assessment_workbench.question_workflow import ModelRouter, QuestionAgentWorkflow
 from assessment_workbench.storage import ArtifactStore, RunStore
 from assessment_workbench.workflow import Step, WorkflowEngine
 
-ResponseT = TypeVar("ResponseT", bound=BaseModel)
-
-
-@dataclass(frozen=True)
-class ModelRouter:
-    standard: StructuredModel
-    strong: StructuredModel
-
-
-@dataclass(frozen=True)
-class QuestionGenerationOutcome:
-    bundle: ExamQuestionBundle
-    requires_human_review: bool = False
+__all__ = ["ExamAgentWorkflow", "ModelRouter"]
 
 
 class ExamAgentWorkflow:
@@ -77,6 +48,7 @@ class ExamAgentWorkflow:
         max_question_attempts: int = 3,
         max_total_question_rounds: int = 7,
         max_draft_validation_attempts: int = 3,
+        max_reviewer_attempts: int = 2,
         max_parallel_questions: int = 1,
         compiler: LatexCompiler | None = None,
         capability_catalog: CapabilityCatalog | None = None,
@@ -100,23 +72,15 @@ class ExamAgentWorkflow:
         self.compiler = compiler
         self.capabilities = capability_catalog or load_default_capability_catalog()
         self.prompts = self.capabilities.prompts
-
-    async def _complete(
-        self,
-        model: StructuredModel,
-        *,
-        prompt: PromptBundle,
-        user_prompt: str,
-        response_model: type[ResponseT],
-        run_id: UUID,
-    ) -> ResponseT:
-        return await model.complete(
-            role=prompt.role,
-            system_prompt=prompt.system_prompt,
-            user_prompt=user_prompt,
-            response_model=response_model,
-            prompt_version=prompt.version,
-            run_id=str(run_id),
+        self.question_workflow = QuestionAgentWorkflow(
+            models,
+            artifacts,
+            runs,
+            self.capabilities,
+            max_question_attempts=max_question_attempts,
+            max_total_question_rounds=max_total_question_rounds,
+            max_draft_validation_attempts=max_draft_validation_attempts,
+            max_reviewer_attempts=max_reviewer_attempts,
         )
 
     async def execute(
@@ -233,10 +197,10 @@ class ExamAgentWorkflow:
                 prompt = self.prompts.require("subject_researcher")
                 validation_feedback: list[str] = []
                 for validation_attempt in range(self.max_draft_validation_attempts):
-                    candidate = await self._complete(
+                    candidate = await complete_with_prompt(
                         self.models.strong,
                         prompt=prompt,
-                        user_prompt=_json_prompt(
+                        user_prompt=json_prompt(
                             subject=subject,
                             target_level=target_level,
                             requirements=requirements,
@@ -295,10 +259,10 @@ class ExamAgentWorkflow:
                 prompt = self.prompts.require("exam_blueprint_planner")
                 validation_feedback: list[str] = []
                 for validation_attempt in range(self.max_draft_validation_attempts):
-                    draft = await self._complete(
+                    draft = await complete_with_prompt(
                         self.models.strong,
                         prompt=prompt,
-                        user_prompt=_json_prompt(
+                        user_prompt=json_prompt(
                             subject_profile=profile.model_dump(mode="json"),
                             target_level=target_level,
                             requirements=requirements,
@@ -386,10 +350,10 @@ class ExamAgentWorkflow:
             planning_feedback: list[str] = []
             for planning_attempt in range(3):
                 prompt = self.prompts.require("question_set_planner")
-                draft = await self._complete(
+                draft = await complete_with_prompt(
                     self.models.strong,
                     prompt=prompt,
-                    user_prompt=_json_prompt(
+                    user_prompt=json_prompt(
                         subject_profile=profile.model_dump(mode="json"),
                         blueprint=exam_blueprint.model_dump(mode="json"),
                         slots=[slot.model_dump(mode="json") for slot in slots],
@@ -536,6 +500,21 @@ class ExamAgentWorkflow:
                         {**records_by_number[plan.number], "status": "running"},
                         immutable_snapshot=False,
                     )
+
+                    def child_created(created: WorkflowRun) -> None:
+                        records_by_number[plan.number] = {
+                            **records_by_number[plan.number],
+                            "run_id": str(created.id),
+                            "status": RunStatus.RUNNING,
+                        }
+                        write_live_manifest()
+                        self.artifacts.write_json(
+                            state["run_id"],
+                            "question-runs.json",
+                            ordered_records(),
+                            created_by_phase="QUESTION_CHILD_CREATED",
+                        )
+
                     child_run, child_state = await self.generate_question_run(
                         profile=profile,
                         blueprint=blueprint,
@@ -545,6 +524,7 @@ class ExamAgentWorkflow:
                         capability_id=request.capability_id,
                         capability_version=request.capability_version,
                         capability_context=request.capability_context,
+                        on_run_created=child_created,
                     )
                     bundle = child_state.get("bundle")
                     bundle_artifact = child_state.get("bundle_artifact")
@@ -813,457 +793,13 @@ class ExamAgentWorkflow:
             capability_version=capability_version,
             capability_context=capability_context or {},
         )
-        return await self._run_question_request(request, on_run_created=on_run_created)
-
-    async def resume_question_run(self, run_id: UUID) -> tuple[WorkflowRun, dict[str, Any]]:
-        checkpoint = self.runs.get_checkpoint(run_id)
-        if checkpoint is None:
-            raise ValueError(f"run has no checkpoint: {run_id}")
-        if not checkpoint.artifact_bindings:
-            raise ValueError(f"run uses a legacy checkpoint without artifact bindings: {run_id}")
-        request_artifact_id = checkpoint.artifact_bindings.get("request")
-        if request_artifact_id is None:
-            artifact = self.artifacts.latest(run_id, "question-request.json")
-            if artifact is None:
-                raise ValueError(f"run has no question request artifact: {run_id}")
-            request_artifact_id = artifact.id
-        request = QuestionGenerationRequest.model_validate(
-            self.artifacts.read_json(request_artifact_id)
-        )
-        restored_state = self._restore_question_state(checkpoint)
-        return await self._run_question_request(
+        return await self.question_workflow.execute(
             request,
-            resume_run_id=run_id,
-            restored_state=restored_state,
-        )
-
-    async def _run_question_request(
-        self,
-        request: QuestionGenerationRequest,
-        *,
-        resume_run_id: UUID | None = None,
-        restored_state: dict[str, Any] | None = None,
-        on_run_created: Callable[[WorkflowRun], None] | None = None,
-    ) -> tuple[WorkflowRun, dict[str, Any]]:
-        capability_validators: list[str] = []
-        if request.capability_id is not None:
-            assert request.capability_version is not None
-            capability = self.capabilities.require_subject_binding(
-                request.capability_id,
-                request.capability_version,
-                request.profile,
-                request.blueprint,
-                request.capability_context,
-            )
-            capability_validators = capability.validators
-        self.capabilities.validate_profile(request.profile, capability_validators)
-        self.capabilities.validate_blueprint(
-            request.profile,
-            request.blueprint,
-            capability_validators,
-        )
-
-        async def generate_child(state: dict[str, Any]) -> dict[str, Any]:
-            request_artifact = self.artifacts.write_json(
-                state["run_id"],
-                "question-request.json",
-                request.model_dump(mode="json"),
-                created_by_phase="QUESTION_GENERATING",
-            )
-            plan_artifact = self.artifacts.write_json(
-                state["run_id"],
-                "question-plan.json",
-                request.plan.model_dump(mode="json"),
-                created_by_phase="QUESTION_GENERATING",
-            )
-            for transport_attempt in range(2):
-                try:
-                    outcome = await self._generate_question(
-                        run_id=state["run_id"],
-                        profile=request.profile,
-                        blueprint=request.blueprint,
-                        plan=request.plan,
-                        source_context=request.source_context,
-                        capability_context=request.capability_context,
-                        capability_validators=capability_validators,
-                    )
-                    break
-                except httpx.HTTPError:
-                    if transport_attempt == 1:
-                        raise
-                    await asyncio.sleep(2)
-            else:
-                raise RuntimeError("question transport retry loop exited unexpectedly")
-            bundle_artifact = self.artifacts.write_json(
-                state["run_id"],
-                "question-bundle.json",
-                outcome.bundle.model_dump(mode="json"),
-                created_by_phase="QUESTION_GENERATING",
-            )
-            return {
-                "bundle": outcome.bundle,
-                "bundle_artifact": bundle_artifact,
-                "requires_human_review": outcome.requires_human_review,
-                "output_artifact_ids": [
-                    request_artifact.id,
-                    plan_artifact.id,
-                    bundle_artifact.id,
-                ],
-                "_checkpoint_artifacts": {
-                    "request": request_artifact.id,
-                    "plan": plan_artifact.id,
-                    "bundle": bundle_artifact.id,
-                },
-            }
-
-        steps: list[tuple[str, Step]] = [("QUESTION_GENERATING", generate_child)]
-        engine = WorkflowEngine(self.runs)
-        if resume_run_id is not None:
-            return await engine.resume(
-                resume_run_id,
-                "exam_question_generation",
-                steps,
-                context=restored_state,
-                parent_run_id=request.parent_run_id,
-            )
-        return await engine.execute(
-            "exam_question_generation",
-            steps,
-            parent_run_id=request.parent_run_id,
             on_run_created=on_run_created,
         )
 
-    def _restore_question_state(self, checkpoint: WorkflowCheckpoint) -> dict[str, Any]:
-        state: dict[str, Any] = {
-            "_checkpoint_artifacts": dict(checkpoint.artifact_bindings),
-            "input_artifact_ids": list(checkpoint.artifact_bindings.values()),
-        }
-        bundle_artifact_id = checkpoint.artifact_bindings.get("bundle")
-        if bundle_artifact_id is not None:
-            state["bundle"] = ExamQuestionBundle.model_validate(
-                self.artifacts.read_json(bundle_artifact_id)
-            )
-            bundle_artifact = self.artifacts.get(bundle_artifact_id)
-            if bundle_artifact is None:
-                raise ValueError(f"bundle artifact metadata is missing: {bundle_artifact_id}")
-            state["bundle_artifact"] = bundle_artifact
-        return state
-
-    async def _generate_question(
-        self,
-        *,
-        run_id: UUID,
-        profile: SubjectProfile,
-        blueprint: ExamBlueprint,
-        plan: QuestionPlan,
-        source_context: str,
-        capability_context: dict[str, list[str]],
-        capability_validators: list[str],
-    ) -> QuestionGenerationOutcome:
-        question_id = uuid4()
-        solution_id = uuid4()
-        rubric_id = uuid4()
-        question: QuestionVersion | None = None
-        solution: SolutionVersion | None = None
-        rubric: RubricVersion | None = None
-        feedback: dict[str, list[str]] = {"writer": [], "solver": [], "rubric": []}
-        retry_target = ArbitrationAction.RETRY_ALL
-        retry_counts = {"problem": 0, "solution": 0, "rubric": 0}
-        for attempt in range(1, self.max_total_question_rounds + 1):
-            rewrite_question = retry_target in {
-                ArbitrationAction.RETRY_PROBLEM,
-                ArbitrationAction.RETRY_ALL,
-            }
-            rewrite_solution = rewrite_question or retry_target is ArbitrationAction.RETRY_SOLUTION
-            rewrite_rubric = rewrite_solution or retry_target is ArbitrationAction.RETRY_RUBRIC
-            if rewrite_question:
-                previous_question = question
-                prompt = self.prompts.require("question_writer")
-                for validation_attempt in range(self.max_draft_validation_attempts):
-                    question_draft = await self._complete(
-                        self.models.standard,
-                        prompt=prompt,
-                        user_prompt=_json_prompt(
-                            profile=profile.model_dump(mode="json"),
-                            blueprint_id=blueprint.id,
-                            question_plan=plan.model_dump(mode="json"),
-                            source_context=source_context,
-                            revision_feedback=feedback["writer"],
-                            capability_context=capability_context,
-                        ),
-                        response_model=QuestionDraft,
-                        run_id=run_id,
-                    )
-                    try:
-                        question = QuestionVersion(
-                            question_id=question_id,
-                            version=(previous_question.version + 1) if previous_question else 1,
-                            parent_version_id=(previous_question.id if previous_question else None),
-                            number=plan.number,
-                            section_id=plan.section_id,
-                            section_title=plan.section_title,
-                            question_type=plan.question_type,
-                            score=plan.score,
-                            metadata=GenerationMetadata(
-                                role=prompt.role,
-                                model="routed",
-                                prompt_version=prompt.version,
-                                plan_id=plan.id,
-                            ),
-                            **question_draft.model_dump(),
-                        )
-                        break
-                    except ValidationError as exc:
-                        if validation_attempt == self.max_draft_validation_attempts - 1:
-                            raise
-                        feedback["writer"] = [_domain_validation_feedback("question", exc)]
-            assert question is not None
-            if rewrite_solution:
-                previous_solution = solution
-                prompt = self.prompts.require("independent_solver")
-                for validation_attempt in range(self.max_draft_validation_attempts):
-                    solution_draft = await self._complete(
-                        self.models.strong,
-                        prompt=prompt,
-                        user_prompt=_json_prompt(
-                            question=question.model_dump(mode="json"),
-                            question_plan=plan.model_dump(mode="json"),
-                            source_context=source_context,
-                            revision_feedback=feedback["solver"],
-                            capability_context=capability_context,
-                        ),
-                        response_model=SolutionDraft,
-                        run_id=run_id,
-                    )
-                    try:
-                        solution = SolutionVersion(
-                            solution_id=solution_id,
-                            question_version_id=question.id,
-                            version=(previous_solution.version + 1) if previous_solution else 1,
-                            parent_version_id=(previous_solution.id if previous_solution else None),
-                            metadata=GenerationMetadata(
-                                role=prompt.role,
-                                model="routed",
-                                prompt_version=prompt.version,
-                                plan_id=plan.id,
-                            ),
-                            **solution_draft.model_dump(),
-                        )
-                        break
-                    except ValidationError as exc:
-                        if validation_attempt == self.max_draft_validation_attempts - 1:
-                            raise
-                        feedback["solver"] = [_domain_validation_feedback("solution", exc)]
-            assert solution is not None
-            if rewrite_rubric:
-                previous_rubric = rubric
-                prompt = self.prompts.require("rubric_builder")
-                for validation_attempt in range(self.max_draft_validation_attempts):
-                    rubric_draft = await self._complete(
-                        self.models.standard,
-                        prompt=prompt,
-                        user_prompt=_json_prompt(
-                            question=question.model_dump(mode="json"),
-                            solution=solution.model_dump(mode="json"),
-                            question_plan=plan.model_dump(mode="json"),
-                            score=plan.score,
-                            revision_feedback=feedback["rubric"],
-                            capability_context=capability_context,
-                        ),
-                        response_model=RubricDraft,
-                        run_id=run_id,
-                    )
-                    try:
-                        rubric = RubricVersion(
-                            rubric_id=rubric_id,
-                            question_version_id=question.id,
-                            solution_version_id=solution.id,
-                            version=(previous_rubric.version + 1) if previous_rubric else 1,
-                            parent_version_id=(previous_rubric.id if previous_rubric else None),
-                            max_score=plan.score,
-                            metadata=GenerationMetadata(
-                                role=prompt.role,
-                                model="routed",
-                                prompt_version=prompt.version,
-                                plan_id=plan.id,
-                            ),
-                            **rubric_draft.model_dump(),
-                        )
-                        break
-                    except ValidationError as exc:
-                        if validation_attempt == self.max_draft_validation_attempts - 1:
-                            raise
-                        feedback["rubric"] = [_domain_validation_feedback("rubric", exc)]
-            assert rubric is not None
-            bundle = ExamQuestionBundle(question=question, solution=solution, rubric=rubric)
-            self.capabilities.validate_bundle(profile, bundle, capability_validators)
-            reports = await self._review(
-                run_id,
-                profile,
-                plan,
-                bundle,
-                capability_context,
-            )
-            self.artifacts.write_json(
-                run_id,
-                f"questions/{plan.number:02d}/reviews-pre-arbitration.json",
-                [report.model_dump(mode="json") for report in reports],
-                created_by_phase=f"QUESTION_ATTEMPT_{attempt}",
-            )
-            decision = await self._arbitrate(
-                run_id,
-                plan,
-                bundle,
-                reports,
-                capability_context,
-            )
-            self._persist_attempt(run_id, plan.number, attempt, bundle, reports, decision)
-            if decision.action in {ArbitrationAction.PASS, ArbitrationAction.PASS_WITH_WARNINGS}:
-                return QuestionGenerationOutcome(
-                    bundle=bundle,
-                    requires_human_review=(decision.action is ArbitrationAction.PASS_WITH_WARNINGS),
-                )
-            if decision.action is ArbitrationAction.ESCALATE_HUMAN:
-                return QuestionGenerationOutcome(bundle=bundle, requires_human_review=True)
-            if decision.action is ArbitrationAction.ABORT:
-                raise RuntimeError(f"question {plan.number} arbitration: {decision.action}")
-            feedback = {
-                "writer": decision.writer_feedback,
-                "solver": decision.solver_feedback,
-                "rubric": decision.rubric_feedback,
-            }
-            retry_target = decision.action
-            if retry_target in {
-                ArbitrationAction.RETRY_PROBLEM,
-                ArbitrationAction.RETRY_ALL,
-            }:
-                retry_bucket = "problem"
-            elif retry_target is ArbitrationAction.RETRY_SOLUTION:
-                retry_bucket = "solution"
-            else:
-                retry_bucket = "rubric"
-            retry_counts[retry_bucket] += 1
-            if retry_counts[retry_bucket] >= self.max_question_attempts:
-                raise RuntimeError(f"question {plan.number} exhausted {retry_bucket} retry budget")
-        raise RuntimeError(f"question {plan.number} exhausted total review round budget")
-
-    async def _review(
-        self,
-        run_id: UUID,
-        profile: SubjectProfile,
-        plan: QuestionPlan,
-        bundle: ExamQuestionBundle,
-        capability_context: dict[str, list[str]],
-    ) -> list[ReviewReport]:
-        async def review(name: str) -> ReviewReport:
-            definition = self.capabilities.reviewers.require(name)
-            if definition.handler is not None:
-                return definition.handler(bundle)
-            assert definition.prompt_key is not None
-            prompt = self.prompts.require(definition.prompt_key)
-            report = await self._complete(
-                self.models.standard,
-                prompt=prompt,
-                user_prompt=_json_prompt(
-                    question_plan=plan.model_dump(mode="json"),
-                    bundle=bundle.model_dump(mode="json"),
-                    capability_context=capability_context,
-                ),
-                response_model=ReviewReport,
-                run_id=run_id,
-            )
-            return report.model_copy(update={"reviewer": name})
-
-        return list(await asyncio.gather(*(review(name) for name in profile.reviewers)))
-
-    async def _arbitrate(
-        self,
-        run_id: UUID,
-        plan: QuestionPlan,
-        bundle: ExamQuestionBundle,
-        reports: list[ReviewReport],
-        capability_context: dict[str, list[str]],
-    ) -> ArbitrationDecision:
-        prompt = self.prompts.require("question_arbiter")
-        decision = await self._complete(
-            self.models.strong,
-            prompt=prompt,
-            user_prompt=_json_prompt(
-                question_plan=plan.model_dump(mode="json"),
-                bundle=bundle.model_dump(mode="json"),
-                reports=[report.model_dump(mode="json") for report in reports],
-                capability_context=capability_context,
-            ),
-            response_model=ArbitrationDecision,
-            run_id=run_id,
-        )
-        fatal_findings = [
-            finding
-            for report in reports
-            for finding in report.findings
-            if finding.severity is FindingSeverity.FATAL
-        ]
-        if fatal_findings and decision.action in {
-            ArbitrationAction.PASS,
-            ArbitrationAction.PASS_WITH_WARNINGS,
-        }:
-            if any(
-                finding.target in {FindingTarget.QUESTION, FindingTarget.BUNDLE}
-                for finding in fatal_findings
-            ):
-                action = ArbitrationAction.RETRY_PROBLEM
-            elif any(finding.target is FindingTarget.SOLUTION for finding in fatal_findings):
-                action = ArbitrationAction.RETRY_SOLUTION
-            else:
-                action = ArbitrationAction.RETRY_RUBRIC
-            return ArbitrationDecision(
-                action=action,
-                rationale=(
-                    "Deterministic review gate overrode an invalid PASS decision because "
-                    "fatal findings remained unresolved."
-                ),
-                finding_codes=[finding.code for finding in fatal_findings],
-                writer_feedback=[
-                    finding.message
-                    for finding in fatal_findings
-                    if finding.target in {FindingTarget.QUESTION, FindingTarget.BUNDLE}
-                ],
-                solver_feedback=[
-                    finding.message
-                    for finding in fatal_findings
-                    if finding.target is FindingTarget.SOLUTION
-                ],
-                rubric_feedback=[
-                    finding.message
-                    for finding in fatal_findings
-                    if finding.target is FindingTarget.RUBRIC
-                ],
-            )
-        return decision
-
-    def _persist_attempt(
-        self,
-        run_id: UUID,
-        number: int,
-        attempt: int,
-        bundle: ExamQuestionBundle,
-        reports: list[ReviewReport],
-        decision: ArbitrationDecision,
-    ) -> None:
-        prefix = f"questions/{number:02d}"
-        for name, payload in (
-            ("question.json", bundle.question.model_dump(mode="json")),
-            ("solution.json", bundle.solution.model_dump(mode="json")),
-            ("rubric.json", bundle.rubric.model_dump(mode="json")),
-            ("reviews.json", [report.model_dump(mode="json") for report in reports]),
-            ("arbitration.json", decision.model_dump(mode="json")),
-        ):
-            self.artifacts.write_json(
-                run_id,
-                f"{prefix}/{name}",
-                payload,
-                created_by_phase=f"QUESTION_ATTEMPT_{attempt}",
-            )
+    async def resume_question_run(self, run_id: UUID) -> tuple[WorkflowRun, dict[str, Any]]:
+        return await self.question_workflow.resume(run_id)
 
 
 def _blueprint_slots(blueprint: ExamBlueprint) -> list[QuestionSlot]:
@@ -1319,15 +855,3 @@ def _materialize_question_plans(
             )
         )
     return plans
-
-
-def _domain_validation_feedback(stage: str, error: ValidationError) -> str:
-    details = json.dumps(error.errors(include_url=False), ensure_ascii=False, default=str)
-    return (
-        f"The {stage} draft failed deterministic domain validation. Correct the draft and "
-        f"return a complete replacement. Validation errors: {details}"
-    )
-
-
-def _json_prompt(**payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)

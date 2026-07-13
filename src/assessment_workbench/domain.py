@@ -738,6 +738,21 @@ class ArbitrationDecision(StrictModel):
     rubric_feedback: list[str] = Field(default_factory=list)
 
 
+class QuestionWorkflowState(StrictModel):
+    question_id: UUID = Field(default_factory=uuid4)
+    solution_id: UUID = Field(default_factory=uuid4)
+    rubric_id: UUID = Field(default_factory=uuid4)
+    round: int = Field(default=1, ge=1)
+    problem_retries: int = Field(default=0, ge=0)
+    solution_retries: int = Field(default=0, ge=0)
+    rubric_retries: int = Field(default=0, ge=0)
+    writer_feedback: list[str] = Field(default_factory=list)
+    solver_feedback: list[str] = Field(default_factory=list)
+    rubric_feedback: list[str] = Field(default_factory=list)
+    last_action: ArbitrationAction | None = None
+    requires_human_review: bool = False
+
+
 class ExamGenerationRequest(BaseModel):
     subject: str
     target_level: str
@@ -779,6 +794,15 @@ class QuestionGenerationRequest(BaseModel):
         return self
 
 
+class QuestionReviewRequest(StrictModel):
+    reviewer: str = Field(min_length=1)
+    plan: QuestionPlan
+    bundle: ExamQuestionBundle
+    capability_context: dict[str, list[str]] = Field(default_factory=dict)
+    parent_run_id: UUID
+    attempt: int = Field(ge=1)
+
+
 class ModelUsage(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
@@ -809,6 +833,24 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+
+
+class ReviewerRunRecord(StrictModel):
+    reviewer: str = Field(min_length=1)
+    attempt: int = Field(ge=1)
+    run_id: UUID
+    status: RunStatus
+    question_version_id: UUID
+    solution_version_id: UUID
+    rubric_version_id: UUID
+    report_artifact_id: UUID | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_report_binding(self) -> "ReviewerRunRecord":
+        if self.status is RunStatus.SUCCEEDED and self.report_artifact_id is None:
+            raise ValueError("succeeded reviewer run requires a report artifact")
+        return self
 
 
 ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {

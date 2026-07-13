@@ -78,6 +78,25 @@ CapabilityCatalog
 
 解析优先级为：显式 Profile/Blueprint > 内置 Subject Capability > Agent 动态研究。能力包 ID/版本写入规划 Artifact，Prompt 版本写入每次模型调用和题目版本元数据。
 
+## 单题阶段与 Reviewer 隔离
+
+整卷父运行只负责规划、并发派发和状态投影。每道题是独立 child run，内部阶段为：
+
+```text
+QUESTION_INITIALIZING
+  -> PROBLEM_GENERATING
+  -> SOLUTION_GENERATING
+  -> RUBRIC_GENERATING
+  -> REVIEWS_GENERATING
+  -> ARBITRATING
+       -> 按依赖跳回 Problem / Solution / Rubric
+       -> QUESTION_FINALIZING
+```
+
+Writer、Solver 和 Rubric 每个阶段完成后立即写不可变 Artifact 和 checkpoint。`WorkflowEngine` 的命名阶段跳转由 Arbiter 决策驱动，PhaseEvent `round` 记录重复进入次数；恢复时从最后一个已完成阶段继续，不重复调用上游模型。
+
+每个 Reviewer 使用独立 `question_review` grandchild run。Reviewer 同批并行执行，报告完成后立即写自己的 Artifact，并更新问题级 `review-runs.json` 实时投影和不可变快照。Manifest 绑定 Question、Solution、Rubric 的具体 version ID；只有输入版本完全一致的成功报告可以复用，单个 Reviewer 失败只重试该 Reviewer。
+
 ## 轻量检索
 
 当前 `LocalKnowledgeBackend` 提供：

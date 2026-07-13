@@ -109,6 +109,51 @@ async def test_resume_starts_after_last_checkpoint(tmp_path: Path) -> None:
     assert store.get_checkpoint(run.id) is None
 
 
+async def test_named_phase_jump_records_rounds_and_preserves_order(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    engine = WorkflowEngine(store)
+    calls: list[str] = []
+
+    async def repeat(state: dict[str, Any]) -> dict[str, Any]:
+        calls.append("repeat")
+        count = int(state.get("count", 0)) + 1
+        if count == 1:
+            return {"count": count, "_next_phase": "REPEAT"}
+        return {"count": count}
+
+    async def finish(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("finish")
+        return {}
+
+    run, _ = await engine.execute("jump", [("REPEAT", repeat), ("FINISH", finish)])
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert calls == ["repeat", "repeat", "finish"]
+    repeat_events = [event for event in store.events(run.id) if event.phase == "REPEAT"]
+    assert [event.round for event in repeat_events] == [1, 1, 2, 2]
+
+
+async def test_unknown_phase_jump_fails_current_phase(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    engine = WorkflowEngine(store)
+
+    async def invalid(_: dict[str, Any]) -> dict[str, Any]:
+        return {"_next_phase": "MISSING"}
+
+    run, _ = await engine.execute("jump", [("ONLY", invalid)])
+
+    assert run.status is RunStatus.FAILED
+    assert "does not exist" in (run.error or "")
+    assert [event.status for event in store.events(run.id)] == [
+        PhaseStatus.RUNNING,
+        PhaseStatus.FAILED,
+    ]
+
+
 async def test_human_review_pauses_and_approval_makes_run_resumable(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()

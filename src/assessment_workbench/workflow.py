@@ -32,6 +32,7 @@ class WorkflowEngine:
         parent_event_id: UUID | None = None,
         on_run_created: RunCreatedCallback | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
+        _validate_steps(steps)
         run = self.store.create(workflow)
         if on_run_created is not None:
             on_run_created(run)
@@ -51,6 +52,7 @@ class WorkflowEngine:
         parent_run_id: UUID | None = None,
         parent_event_id: UUID | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
+        _validate_steps(steps)
         run = self.store.get(run_id)
         if run is None:
             raise KeyError(f"run not found: {run_id}")
@@ -92,13 +94,19 @@ class WorkflowEngine:
     ) -> tuple[WorkflowRun, dict[str, Any]]:
 
         try:
-            for step_index, (phase, step) in enumerate(steps[start_index:], start=start_index):
+            step_index = start_index
+            while step_index < len(steps):
+                phase, step = steps[step_index]
                 if self._cancel_if_requested(run):
                     return run, state
                 run.current_phase = phase
                 self.store.save(run)
                 occurrence_id = uuid4()
                 started_at = now_utc()
+                round_number = 1 + sum(
+                    event.phase == phase and event.status is PhaseStatus.RUNNING
+                    for event in self.store.events(run.id)
+                )
                 self.store.append_event(
                     PhaseEvent(
                         run_id=run.id,
@@ -106,6 +114,7 @@ class WorkflowEngine:
                         phase=phase,
                         status=PhaseStatus.RUNNING,
                         occurrence_id=occurrence_id,
+                        round=round_number,
                         parent_run_id=parent_run_id,
                         parent_event_id=parent_event_id,
                         input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
@@ -114,6 +123,7 @@ class WorkflowEngine:
                 )
                 try:
                     updates = await step(state)
+                    next_phase = updates.pop("_next_phase", None)
                     artifact_updates = _artifact_bindings(
                         updates.pop("_checkpoint_artifacts", None)
                     )
@@ -129,6 +139,30 @@ class WorkflowEngine:
                         if child_run_id not in child_run_ids:
                             child_run_ids.append(child_run_id)
                     state["_checkpoint_child_run_ids"] = child_run_ids
+                    human_review = state.get("_human_review")
+                    next_step_index = _phase_step_index(
+                        steps,
+                        next_phase,
+                        default=step_index + 1,
+                        target_name="workflow next phase",
+                    )
+                    if isinstance(human_review, dict) and next_phase is not None:
+                        raise ValueError("a workflow step cannot request a jump and human review")
+                    resume_step_index = next_step_index
+                    retry_step_index = step_index
+                    if isinstance(human_review, dict):
+                        resume_step_index = _phase_step_index(
+                            steps,
+                            human_review.get("resume_phase"),
+                            default=resume_step_index,
+                            target_name="human review resume phase",
+                        )
+                        retry_step_index = _phase_step_index(
+                            steps,
+                            human_review.get("retry_phase"),
+                            default=retry_step_index,
+                            target_name="human review retry phase",
+                        )
                 except Exception as exc:
                     self.store.append_event(
                         PhaseEvent(
@@ -137,6 +171,7 @@ class WorkflowEngine:
                             phase=phase,
                             status=PhaseStatus.FAILED,
                             occurrence_id=occurrence_id,
+                            round=round_number,
                             parent_run_id=parent_run_id,
                             parent_event_id=parent_event_id,
                             input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
@@ -155,6 +190,7 @@ class WorkflowEngine:
                         phase=phase,
                         status=PhaseStatus.COMPLETED,
                         occurrence_id=occurrence_id,
+                        round=round_number,
                         parent_run_id=parent_run_id,
                         parent_event_id=parent_event_id,
                         input_artifact_ids=_artifact_ids(state.get("input_artifact_ids")),
@@ -165,20 +201,7 @@ class WorkflowEngine:
                 )
                 if self._cancel_if_requested(run):
                     return run, state
-                human_review = state.pop("_human_review", None)
-                resume_step_index = step_index + 1
-                retry_step_index = step_index
-                if isinstance(human_review, dict):
-                    resume_step_index = _review_step_index(
-                        steps,
-                        human_review.get("resume_phase"),
-                        default=resume_step_index,
-                    )
-                    retry_step_index = _review_step_index(
-                        steps,
-                        human_review.get("retry_phase"),
-                        default=retry_step_index,
-                    )
+                state.pop("_human_review", None)
                 self.store.save_checkpoint(
                     WorkflowCheckpoint(
                         run_id=run.id,
@@ -203,6 +226,7 @@ class WorkflowEngine:
                     self.store.release(run)
                     state["human_review_request_id"] = str(request.id)
                     return run, state
+                step_index = next_step_index
         except (KeyboardInterrupt, SystemExit):
             self.store.transition(run, RunStatus.INTERRUPTED)
             self.store.release(run)
@@ -281,17 +305,26 @@ def _child_run_ids(value: object) -> list[UUID]:
     return result
 
 
-def _review_step_index(
+def _phase_step_index(
     steps: list[tuple[str, Step]],
     phase: object,
     *,
     default: int,
+    target_name: str,
 ) -> int:
     if phase is None:
         return default
     if not isinstance(phase, str):
-        raise ValueError("human review phase target must be a string")
+        raise ValueError(f"{target_name} must be a string")
     for index, (candidate, _) in enumerate(steps):
         if candidate == phase:
             return index
-    raise ValueError(f"human review phase target does not exist: {phase}")
+    raise ValueError(f"{target_name} does not exist: {phase}")
+
+
+def _validate_steps(steps: list[tuple[str, Step]]) -> None:
+    phases = [phase for phase, _ in steps]
+    if any(not phase for phase in phases):
+        raise ValueError("workflow phase names cannot be empty")
+    if len(phases) != len(set(phases)):
+        raise ValueError("workflow phase names must be unique")

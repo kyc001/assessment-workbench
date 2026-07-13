@@ -19,6 +19,7 @@
 - 可选 OpenAI-compatible 语义知识抽取，严格使用 JSON Schema 输出
 - 模型调用记录角色、模型、Prompt 版本、请求/响应哈希、token 和错误
 - 版本化 Prompt Registry 与科目能力包，已注册科目可锁定结构，未知科目由 Agent 动态规划
+- 单题 Writer/Solver/Rubric 阶段可恢复，Reviewer 独立并行运行并只重试失败项
 - 轻量关键词检索和一层知识图谱扩展
 - 从知识点标签生成带来源上下文的 `QuestionSpec`
 - 为 LightRAG、RAG-Anything 等后端预留端口，但默认不安装

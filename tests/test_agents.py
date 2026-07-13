@@ -1,7 +1,9 @@
+import asyncio
 import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -19,10 +21,12 @@ from assessment_workbench.domain import (
     HumanDecisionType,
     QuestionDraft,
     QuestionPart,
+    QuestionPlan,
     QuestionPlanDraft,
     QuestionPlanSetDraft,
     QuestionType,
     ReviewerName,
+    ReviewerRunRecord,
     ReviewFinding,
     ReviewReport,
     RubricDraft,
@@ -37,7 +41,7 @@ from assessment_workbench.storage import ArtifactStore, RunStore, Workspace
 
 
 class FixtureModel:
-    def __init__(self, responses: dict[str, list[BaseModel]]) -> None:
+    def __init__(self, responses: dict[str, list[BaseModel | BaseException]]) -> None:
         self.responses = responses
         self.calls: dict[str, int] = defaultdict(int)
 
@@ -45,7 +49,80 @@ class FixtureModel:
         role = str(kwargs["role"])
         index = self.calls[role]
         self.calls[role] += 1
-        return self.responses[role][index]
+        response = self.responses[role][index]
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+def single_question_context(
+    reviewers: list[str],
+) -> tuple[
+    SubjectProfile,
+    ExamBlueprint,
+    QuestionPlan,
+    QuestionDraft,
+    SolutionDraft,
+    RubricDraft,
+]:
+    profile = SubjectProfile(
+        id="mathematics",
+        display_name="Mathematics",
+        supported_question_types=[QuestionType.CALCULATION],
+        reviewers=reviewers,
+        latex_template="generic-v1",
+        difficulty_dimensions=["reasoning"],
+    )
+    blueprint = ExamBlueprint(
+        id="single-question",
+        subject_profile=profile.id,
+        title="Single question",
+        target_level="Grade 12",
+        duration_minutes=20,
+        total_score=10,
+        sections=[
+            ExamSectionBlueprint(
+                id="calculation",
+                title="Calculation",
+                question_type=QuestionType.CALCULATION,
+                count=1,
+                score_each=10,
+            )
+        ],
+        coverage=[CoverageTarget(topic_tag="algebra", target_score=10)],
+        difficulty_distribution=DifficultyDistribution(easy=0, medium=1, hard=0),
+    )
+    plan = QuestionPlan(
+        id="single-question:q01",
+        number=1,
+        question_type=QuestionType.CALCULATION,
+        score=10,
+        section_id="calculation",
+        section_title="Calculation",
+        slot=1,
+        topic_tags=["algebra"],
+        primary_skill="Solve a linear equation",
+        design_brief="Use a direct one-variable equation.",
+        difficulty="medium",
+        estimated_minutes=10,
+        answer_form="A single real value",
+        solution_outline=["Isolate the variable"],
+        rubric_focus=["Correct transformation", "Correct result"],
+        verification_methods=["Substitute the result"],
+        originality_constraints=["Use original coefficients"],
+    )
+    question = QuestionDraft(statement="Solve x + 2 = 5.", topic_tags=["algebra"])
+    solution = SolutionDraft(
+        steps=[SolutionStep(id="s1", description="Subtract two from both sides")],
+        final_answer="x = 3",
+    )
+    rubric = RubricDraft(
+        items=[
+            RubricItem(id="r1", description="Sets up the equation", score=4),
+            RubricItem(id="r2", description="Obtains the answer", score=6),
+        ]
+    )
+    return profile, blueprint, plan, question, solution, rubric
 
 
 class StopAtQuestionPlanningModel:
@@ -56,6 +133,19 @@ class StopAtQuestionPlanningModel:
         role = str(kwargs["role"])
         self.roles.append(role)
         raise RuntimeError("stop after capability planning")
+
+
+class BlockingFixtureModel(FixtureModel):
+    def __init__(self, responses: dict[str, list[BaseModel | BaseException]]) -> None:
+        super().__init__(responses)
+        self.writer_started = asyncio.Event()
+        self.release_writer = asyncio.Event()
+
+    async def complete(self, **kwargs: Any) -> BaseModel:
+        if kwargs["role"] == "question_writer":
+            self.writer_started.set()
+            await self.release_writer.wait()
+        return await super().complete(**kwargs)
 
 
 async def test_gaokao_request_uses_locked_capability_before_model_planning(
@@ -83,6 +173,196 @@ async def test_gaokao_request_uses_locked_capability_before_model_planning(
     assert state["planning"].capability_id == "gaokao-mathematics"
     assert state["blueprint"].total_score == 150
     assert sum(section.count for section in state["blueprint"].sections) == 19
+
+
+async def test_question_resume_reuses_completed_problem_stage(tmp_path: Path) -> None:
+    profile, blueprint, plan, question, solution, rubric = single_question_context(
+        ["solvability", "structure"]
+    )
+    passed_review = ReviewReport(reviewer="solvability", passed=True)
+    passed = ArbitrationDecision(action=ArbitrationAction.PASS, rationale="All checks pass.")
+    standard = FixtureModel(
+        {
+            "question_writer": [question],
+            "rubric_builder": [rubric],
+            "solvability_reviewer": [passed_review],
+        }
+    )
+    strong = FixtureModel(
+        {
+            "independent_solver": [KeyboardInterrupt(), solution],
+            "question_arbiter": [passed],
+        }
+    )
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    artifacts = ArtifactStore(workspace)
+    runs = RunStore(workspace)
+    workflow = ExamAgentWorkflow(
+        ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
+        artifacts,
+        runs,
+    )
+
+    run, _ = await workflow.generate_question_run(
+        profile=profile,
+        blueprint=blueprint,
+        plan=plan,
+    )
+
+    assert run.status is RunStatus.INTERRUPTED
+    assert artifacts.latest(run.id, "questions/01/question.json") is not None
+    assert artifacts.latest(run.id, "questions/01/solution.json") is None
+
+    resumed, state = await workflow.resume_question_run(run.id)
+
+    assert resumed.status is RunStatus.SUCCEEDED
+    assert state["bundle"].solution.final_answer[0].content == "x = 3"
+    assert standard.calls["question_writer"] == 1
+    assert strong.calls["independent_solver"] == 2
+    problem_rounds = [
+        event.round
+        for event in runs.events(run.id)
+        if event.phase == "PROBLEM_GENERATING" and event.status.value == "completed"
+    ]
+    solution_running_rounds = [
+        event.round
+        for event in runs.events(run.id)
+        if event.phase == "SOLUTION_GENERATING" and event.status.value == "running"
+    ]
+    assert problem_rounds == [1]
+    assert solution_running_rounds == [1, 2]
+
+
+async def test_reviewer_failure_retries_only_failed_reviewer(tmp_path: Path) -> None:
+    profile, blueprint, plan, question, solution, rubric = single_question_context(
+        ["solvability", "pedagogical", "structure"]
+    )
+    solvability_passed = ReviewReport(reviewer="solvability", passed=True)
+    pedagogical_passed = ReviewReport(reviewer="pedagogical", passed=True)
+    passed = ArbitrationDecision(action=ArbitrationAction.PASS, rationale="All checks pass.")
+    standard = FixtureModel(
+        {
+            "question_writer": [question],
+            "rubric_builder": [rubric],
+            "solvability_reviewer": [RuntimeError("temporary failure"), solvability_passed],
+            "pedagogical_reviewer": [pedagogical_passed],
+        }
+    )
+    strong = FixtureModel(
+        {
+            "independent_solver": [solution],
+            "question_arbiter": [passed],
+        }
+    )
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    artifacts = ArtifactStore(workspace)
+    runs = RunStore(workspace)
+    workflow = ExamAgentWorkflow(
+        ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
+        artifacts,
+        runs,
+    )
+
+    run, state = await workflow.generate_question_run(
+        profile=profile,
+        blueprint=blueprint,
+        plan=plan,
+    )
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert standard.calls["solvability_reviewer"] == 2
+    assert standard.calls["pedagogical_reviewer"] == 1
+    manifest = artifacts.latest(run.id, "review-runs.json")
+    assert manifest is not None
+    payload = artifacts.read_json(manifest.id)
+    assert isinstance(payload, list)
+    records = [ReviewerRunRecord.model_validate(item) for item in payload]
+    assert [record.status for record in records if record.reviewer == "solvability"] == [
+        RunStatus.FAILED,
+        RunStatus.SUCCEEDED,
+    ]
+    assert len([record for record in records if record.reviewer == "pedagogical"]) == 1
+    assert len([record for record in records if record.reviewer == "structure"]) == 1
+    bundle = state["bundle"]
+    assert all(
+        record.question_version_id == bundle.question.id
+        and record.solution_version_id == bundle.solution.id
+        and record.rubric_version_id == bundle.rubric.id
+        for record in records
+    )
+
+
+async def test_parent_manifest_exposes_child_run_before_writer_finishes(tmp_path: Path) -> None:
+    profile, blueprint, plan, question, solution, rubric = single_question_context(
+        ["solvability", "structure"]
+    )
+    plan_set = QuestionPlanSetDraft(
+        plans=[
+            QuestionPlanDraft(
+                section_id=plan.section_id,
+                slot=plan.slot,
+                topic_tags=plan.topic_tags,
+                primary_skill=plan.primary_skill,
+                design_brief=plan.design_brief,
+                difficulty=plan.difficulty,
+                estimated_minutes=plan.estimated_minutes,
+                answer_form=plan.answer_form,
+                solution_outline=plan.solution_outline,
+                rubric_focus=plan.rubric_focus,
+                verification_methods=plan.verification_methods,
+                originality_constraints=plan.originality_constraints,
+            )
+        ]
+    )
+    passed_review = ReviewReport(reviewer="solvability", passed=True)
+    passed = ArbitrationDecision(action=ArbitrationAction.PASS, rationale="All checks pass.")
+    standard = BlockingFixtureModel(
+        {
+            "question_writer": [question],
+            "rubric_builder": [rubric],
+            "solvability_reviewer": [passed_review],
+        }
+    )
+    strong = FixtureModel(
+        {
+            "question_set_planner": [plan_set],
+            "independent_solver": [solution],
+            "question_arbiter": [passed],
+        }
+    )
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    artifacts = ArtifactStore(workspace)
+    workflow = ExamAgentWorkflow(
+        ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
+        artifacts,
+        RunStore(workspace),
+    )
+    parent_ids: list[str] = []
+
+    execution = asyncio.create_task(
+        workflow.execute(
+            subject="mathematics",
+            target_level="Grade 12",
+            requirements="One question",
+            subject_profile=profile,
+            blueprint=blueprint,
+            on_run_created=lambda run: parent_ids.append(str(run.id)),
+        )
+    )
+    await asyncio.wait_for(standard.writer_started.wait(), timeout=5)
+
+    assert len(parent_ids) == 1
+    manifest = artifacts.read_editable_json(UUID(parent_ids[0]), "question-runs.json")
+    assert isinstance(manifest, list)
+    assert manifest[0]["run_id"] is not None
+    assert manifest[0]["status"] == RunStatus.RUNNING
+
+    standard.release_writer.set()
+    run, _ = await execution
+    assert run.status is RunStatus.SUCCEEDED
 
 
 async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None:
