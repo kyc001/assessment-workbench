@@ -16,6 +16,7 @@ from assessment_workbench.domain import (
     BlueprintDraft,
     ExamBlueprint,
     ExamDocument,
+    ExamGenerationRequest,
     ExamPlanningMode,
     ExamPlanningRecord,
     ExamQuestionBundle,
@@ -23,6 +24,7 @@ from assessment_workbench.domain import (
     FindingTarget,
     GenerationMetadata,
     QuestionDraft,
+    QuestionGenerationRequest,
     QuestionPlan,
     QuestionPlanDraft,
     QuestionPlanSetDraft,
@@ -38,12 +40,13 @@ from assessment_workbench.domain import (
     SolutionVersion,
     SubjectProfile,
     SubjectProfileCandidate,
+    WorkflowCheckpoint,
     WorkflowRun,
 )
 from assessment_workbench.latex_service import ExamLatexService
 from assessment_workbench.ports import StructuredModel
 from assessment_workbench.storage import ArtifactStore, RunStore
-from assessment_workbench.workflow import WorkflowEngine
+from assessment_workbench.workflow import Step, WorkflowEngine
 
 SUPPORTED_REVIEWERS = frozenset(
     {"mathematical", "subject", "solvability", "rubric", "pedagogical", "structure"}
@@ -54,6 +57,12 @@ SUPPORTED_REVIEWERS = frozenset(
 class ModelRouter:
     standard: StructuredModel
     strong: StructuredModel
+
+
+@dataclass(frozen=True)
+class QuestionGenerationOutcome:
+    bundle: ExamQuestionBundle
+    requires_human_review: bool = False
 
 
 class ExamAgentWorkflow:
@@ -96,12 +105,58 @@ class ExamAgentWorkflow:
         source_context: str = "",
         subject_profile: SubjectProfile | None = None,
         blueprint: ExamBlueprint | None = None,
+        require_blueprint_approval: bool = False,
+        require_exam_approval: bool = False,
         on_run_created: Callable[[WorkflowRun], None] | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
-        if (subject_profile is None) != (blueprint is None):
-            raise ValueError("subject_profile and blueprint must be provided together")
-        provided_profile = subject_profile
-        provided_blueprint = blueprint
+        request = ExamGenerationRequest(
+            subject=subject,
+            target_level=target_level,
+            requirements=requirements,
+            source_context=source_context,
+            subject_profile=subject_profile,
+            blueprint=blueprint,
+            require_blueprint_approval=require_blueprint_approval,
+            require_exam_approval=require_exam_approval,
+        )
+        return await self._run_exam_request(request, on_run_created=on_run_created)
+
+    async def resume(self, run_id: UUID) -> tuple[WorkflowRun, dict[str, Any]]:
+        checkpoint = self.runs.get_checkpoint(run_id)
+        if checkpoint is None:
+            raise ValueError(f"run has no checkpoint: {run_id}")
+        if not checkpoint.artifact_bindings:
+            raise ValueError(f"run uses a legacy checkpoint without artifact bindings: {run_id}")
+        request_artifact_id = checkpoint.artifact_bindings.get("request")
+        if request_artifact_id is None:
+            artifact = self.artifacts.latest(run_id, "exam-request.json")
+            if artifact is None:
+                raise ValueError(f"run has no exam request artifact: {run_id}")
+            request_artifact_id = artifact.id
+        request = ExamGenerationRequest.model_validate(
+            self.artifacts.read_json(request_artifact_id)
+        )
+        restored_state = self._restore_exam_state(checkpoint)
+        return await self._run_exam_request(
+            request,
+            resume_run_id=run_id,
+            restored_state=restored_state,
+        )
+
+    async def _run_exam_request(
+        self,
+        request: ExamGenerationRequest,
+        *,
+        resume_run_id: UUID | None = None,
+        restored_state: dict[str, Any] | None = None,
+        on_run_created: Callable[[WorkflowRun], None] | None = None,
+    ) -> tuple[WorkflowRun, dict[str, Any]]:
+        subject = request.subject
+        target_level = request.target_level
+        requirements = request.requirements
+        source_context = request.source_context
+        provided_profile = request.subject_profile
+        provided_blueprint = request.blueprint
         planning_mode = (
             ExamPlanningMode.PRESET if provided_profile is not None else ExamPlanningMode.AGENT
         )
@@ -114,6 +169,12 @@ class ExamAgentWorkflow:
                 )
 
         async def research_subject(state: dict[str, Any]) -> dict[str, Any]:
+            request_artifact = self.artifacts.write_json(
+                state["run_id"],
+                "exam-request.json",
+                request.model_dump(mode="json"),
+                created_by_phase="SUBJECT_RESEARCHING",
+            )
             if provided_profile is None:
                 candidate = await self.models.strong.complete(
                     role="subject_researcher",
@@ -151,7 +212,14 @@ class ExamAgentWorkflow:
                 profile.model_dump(mode="json"),
                 created_by_phase="SUBJECT_RESEARCHING",
             )
-            return {"profile": profile, "output_artifact_ids": [artifact.id]}
+            return {
+                "profile": profile,
+                "output_artifact_ids": [request_artifact.id, artifact.id],
+                "_checkpoint_artifacts": {
+                    "request": request_artifact.id,
+                    "profile": artifact.id,
+                },
+            }
 
         async def plan_exam(state: dict[str, Any]) -> dict[str, Any]:
             profile: SubjectProfile = state["profile"]
@@ -205,6 +273,22 @@ class ExamAgentWorkflow:
                 "blueprint": exam_blueprint,
                 "planning": planning,
                 "output_artifact_ids": [blueprint_artifact.id, planning_artifact.id],
+                "_checkpoint_artifacts": {
+                    "blueprint": blueprint_artifact.id,
+                    "planning": planning_artifact.id,
+                },
+            }
+
+        async def approve_blueprint(state: dict[str, Any]) -> dict[str, Any]:
+            if not request.require_blueprint_approval or planning_mode is ExamPlanningMode.PRESET:
+                return {}
+            bindings = state.get("_checkpoint_artifacts", {})
+            return {
+                "_human_review": {
+                    "prompt": "Approve the generated exam blueprint before question planning.",
+                    "artifact_ids": [bindings["blueprint"], bindings["planning"]],
+                    "retry_phase": "EXAM_PLANNING",
+                }
             }
 
         async def plan_questions(state: dict[str, Any]) -> dict[str, Any]:
@@ -258,6 +342,7 @@ class ExamAgentWorkflow:
             return {
                 "question_plans": question_plans,
                 "output_artifact_ids": [artifact.id],
+                "_checkpoint_artifacts": {"question_plans": artifact.id},
             }
 
         async def generate_questions(state: dict[str, Any]) -> dict[str, Any]:
@@ -276,9 +361,35 @@ class ExamAgentWorkflow:
                     "bundle_artifact_id": None,
                     "bundle_path": None,
                     "editable_path": None,
+                    "requires_human_review": False,
                 }
                 for plan in question_plans
             }
+            existing_records: list[object] = []
+            restored_records = state.get("question_runs")
+            if isinstance(restored_records, list):
+                existing_records = restored_records
+            else:
+                try:
+                    editable_records = self.artifacts.read_editable_json(
+                        state["run_id"], "question-runs.json"
+                    )
+                except (FileNotFoundError, OSError, ValueError):
+                    pass
+                else:
+                    if isinstance(editable_records, list):
+                        existing_records = editable_records
+            for record in existing_records:
+                if not isinstance(record, dict):
+                    continue
+                try:
+                    number = int(record["question_number"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                plan = next((item for item in question_plans if item.number == number), None)
+                if plan is None or record.get("plan_id") != plan.id:
+                    continue
+                records_by_number[number] = {**records_by_number[number], **record}
 
             def ordered_records() -> list[dict[str, Any]]:
                 return [records_by_number[number] for number in sorted(records_by_number)]
@@ -315,6 +426,26 @@ class ExamAgentWorkflow:
                 ordered_records(),
                 created_by_phase="QUESTIONS_DISPATCHING",
             )
+
+            reused_results: dict[int, tuple[ExamQuestionBundle, ArtifactRef]] = {}
+            pending_plans: list[QuestionPlan] = []
+            for plan in question_plans:
+                record = records_by_number[plan.number]
+                artifact_id = record.get("bundle_artifact_id")
+                if record.get("status") == RunStatus.SUCCEEDED and artifact_id:
+                    try:
+                        bundle_artifact = self.artifacts.get(UUID(str(artifact_id)))
+                        if bundle_artifact is None:
+                            raise KeyError(artifact_id)
+                        reused_bundle = ExamQuestionBundle.model_validate(
+                            self.artifacts.read_json(bundle_artifact.id)
+                        )
+                    except (KeyError, OSError, ValueError):
+                        pending_plans.append(plan)
+                    else:
+                        reused_results[plan.number] = (reused_bundle, bundle_artifact)
+                    continue
+                pending_plans.append(plan)
 
             async def generate(
                 plan: QuestionPlan,
@@ -367,24 +498,27 @@ class ExamAgentWorkflow:
                             "editable_path": (
                                 str(editable_path) if editable_path is not None else None
                             ),
+                            "requires_human_review": bool(
+                                child_state.get("requires_human_review", False)
+                            ),
                         },
                         immutable_snapshot=True,
                     )
                     return plan, child_run, child_state
 
-            child_results = await asyncio.gather(*(generate(plan) for plan in question_plans))
-            bundles: list[ExamQuestionBundle] = []
+            child_results = await asyncio.gather(*(generate(plan) for plan in pending_plans))
+            bundles: list[ExamQuestionBundle] = [item[0] for item in reused_results.values()]
             failed_numbers: list[int] = []
-            child_artifact_ids: list[UUID] = []
+            child_artifact_ids: list[UUID] = [item[1].id for item in reused_results.values()]
             for plan, child_run, child_state in child_results:
-                bundle = child_state.get("bundle")
+                child_bundle = child_state.get("bundle")
                 bundle_artifact = child_state.get("bundle_artifact")
                 if (
                     child_run.status is RunStatus.SUCCEEDED
-                    and isinstance(bundle, ExamQuestionBundle)
+                    and isinstance(child_bundle, ExamQuestionBundle)
                     and isinstance(bundle_artifact, ArtifactRef)
                 ):
-                    bundles.append(bundle)
+                    bundles.append(child_bundle)
                     child_artifact_ids.append(bundle_artifact.id)
                 else:
                     failed_numbers.append(plan.number)
@@ -414,6 +548,13 @@ class ExamAgentWorkflow:
                     artifact.id,
                     *child_artifact_ids,
                 ],
+                "_checkpoint_artifacts": {
+                    "question_runs": runs_artifact.id,
+                    "bundles": artifact.id,
+                },
+                "_checkpoint_child_run_ids": [
+                    UUID(str(record["run_id"])) for record in child_records if record.get("run_id")
+                ],
             }
 
         async def assemble(state: dict[str, Any]) -> dict[str, Any]:
@@ -433,7 +574,32 @@ class ExamAgentWorkflow:
                 exam.model_dump(mode="json"),
                 created_by_phase="EXAM_ASSEMBLING",
             )
-            return {"exam": exam, "artifacts": [artifact], "output_artifact_ids": [artifact.id]}
+            return {
+                "exam": exam,
+                "artifacts": [artifact],
+                "output_artifact_ids": [artifact.id],
+                "_checkpoint_artifacts": {"exam": artifact.id},
+            }
+
+        async def approve_exam(state: dict[str, Any]) -> dict[str, Any]:
+            question_runs = state.get("question_runs", [])
+            escalated = any(
+                isinstance(record, dict) and bool(record.get("requires_human_review"))
+                for record in question_runs
+            )
+            if not request.require_exam_approval and not escalated:
+                return {}
+            bindings = state.get("_checkpoint_artifacts", {})
+            prompt = "Approve the assembled exam before document generation."
+            if escalated:
+                prompt += " One or more questions were explicitly escalated by arbitration."
+            return {
+                "_human_review": {
+                    "prompt": prompt,
+                    "artifact_ids": [bindings["exam"], bindings["question_runs"]],
+                    "retry_phase": "EXAM_ASSEMBLING",
+                }
+            }
 
         async def export(state: dict[str, Any]) -> dict[str, Any]:
             exam: ExamDocument = state["exam"]
@@ -473,18 +639,73 @@ class ExamAgentWorkflow:
                     )
             return {"artifacts": outputs, "output_artifact_ids": [item.id for item in outputs]}
 
+        steps: list[tuple[str, Step]] = [
+            ("SUBJECT_RESEARCHING", research_subject),
+            ("EXAM_PLANNING", plan_exam),
+            ("BLUEPRINT_APPROVAL", approve_blueprint),
+            ("QUESTION_PLANNING", plan_questions),
+            ("QUESTIONS_GENERATING", generate_questions),
+            ("EXAM_ASSEMBLING", assemble),
+            ("EXAM_APPROVAL", approve_exam),
+            ("LATEX_FORMATTING", export),
+        ]
+        if resume_run_id is not None:
+            return await self.engine.resume(
+                resume_run_id,
+                "exam_agent_generation",
+                steps,
+                context=restored_state,
+            )
         return await self.engine.execute(
             "exam_agent_generation",
-            [
-                ("SUBJECT_RESEARCHING", research_subject),
-                ("EXAM_PLANNING", plan_exam),
-                ("QUESTION_PLANNING", plan_questions),
-                ("QUESTIONS_GENERATING", generate_questions),
-                ("EXAM_ASSEMBLING", assemble),
-                ("LATEX_FORMATTING", export),
-            ],
+            steps,
             on_run_created=on_run_created,
         )
+
+    def _restore_exam_state(self, checkpoint: WorkflowCheckpoint) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "_checkpoint_artifacts": dict(checkpoint.artifact_bindings),
+            "_checkpoint_child_run_ids": list(checkpoint.child_run_ids),
+            "input_artifact_ids": list(checkpoint.artifact_bindings.values()),
+        }
+
+        def payload(key: str) -> object | None:
+            artifact_id = checkpoint.artifact_bindings.get(key)
+            return self.artifacts.read_json(artifact_id) if artifact_id is not None else None
+
+        profile_payload = payload("profile")
+        if profile_payload is not None:
+            state["profile"] = SubjectProfile.model_validate(profile_payload)
+        blueprint_payload = payload("blueprint")
+        if blueprint_payload is not None:
+            state["blueprint"] = ExamBlueprint.model_validate(blueprint_payload)
+        planning_payload = payload("planning")
+        if planning_payload is not None:
+            state["planning"] = ExamPlanningRecord.model_validate(planning_payload)
+        plans_payload = payload("question_plans")
+        if plans_payload is not None:
+            if not isinstance(plans_payload, list):
+                raise ValueError("question plan artifact is not a list")
+            state["question_plans"] = [QuestionPlan.model_validate(item) for item in plans_payload]
+        runs_payload = payload("question_runs")
+        if runs_payload is not None:
+            if not isinstance(runs_payload, list):
+                raise ValueError("question run artifact is not a list")
+            state["question_runs"] = runs_payload
+        bundles_payload = payload("bundles")
+        if bundles_payload is not None:
+            if not isinstance(bundles_payload, list):
+                raise ValueError("question bundle artifact is not a list")
+            state["bundles"] = [ExamQuestionBundle.model_validate(item) for item in bundles_payload]
+        exam_payload = payload("exam")
+        if exam_payload is not None:
+            state["exam"] = ExamDocument.model_validate(exam_payload)
+            exam_artifact_id = checkpoint.artifact_bindings["exam"]
+            exam_artifact = self.artifacts.get(exam_artifact_id)
+            if exam_artifact is None:
+                raise ValueError(f"exam artifact metadata is missing: {exam_artifact_id}")
+            state["artifacts"] = [exam_artifact]
+        return state
 
     async def generate_question_run(
         self,
@@ -496,21 +717,66 @@ class ExamAgentWorkflow:
         parent_run_id: UUID | None = None,
         on_run_created: Callable[[WorkflowRun], None] | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
+        request = QuestionGenerationRequest(
+            profile=profile,
+            blueprint=blueprint,
+            plan=plan,
+            source_context=source_context,
+            parent_run_id=parent_run_id,
+        )
+        return await self._run_question_request(request, on_run_created=on_run_created)
+
+    async def resume_question_run(self, run_id: UUID) -> tuple[WorkflowRun, dict[str, Any]]:
+        checkpoint = self.runs.get_checkpoint(run_id)
+        if checkpoint is None:
+            raise ValueError(f"run has no checkpoint: {run_id}")
+        if not checkpoint.artifact_bindings:
+            raise ValueError(f"run uses a legacy checkpoint without artifact bindings: {run_id}")
+        request_artifact_id = checkpoint.artifact_bindings.get("request")
+        if request_artifact_id is None:
+            artifact = self.artifacts.latest(run_id, "question-request.json")
+            if artifact is None:
+                raise ValueError(f"run has no question request artifact: {run_id}")
+            request_artifact_id = artifact.id
+        request = QuestionGenerationRequest.model_validate(
+            self.artifacts.read_json(request_artifact_id)
+        )
+        restored_state = self._restore_question_state(checkpoint)
+        return await self._run_question_request(
+            request,
+            resume_run_id=run_id,
+            restored_state=restored_state,
+        )
+
+    async def _run_question_request(
+        self,
+        request: QuestionGenerationRequest,
+        *,
+        resume_run_id: UUID | None = None,
+        restored_state: dict[str, Any] | None = None,
+        on_run_created: Callable[[WorkflowRun], None] | None = None,
+    ) -> tuple[WorkflowRun, dict[str, Any]]:
         async def generate_child(state: dict[str, Any]) -> dict[str, Any]:
+            request_artifact = self.artifacts.write_json(
+                state["run_id"],
+                "question-request.json",
+                request.model_dump(mode="json"),
+                created_by_phase="QUESTION_GENERATING",
+            )
             plan_artifact = self.artifacts.write_json(
                 state["run_id"],
                 "question-plan.json",
-                plan.model_dump(mode="json"),
+                request.plan.model_dump(mode="json"),
                 created_by_phase="QUESTION_GENERATING",
             )
             for transport_attempt in range(2):
                 try:
-                    bundle = await self._generate_question(
+                    outcome = await self._generate_question(
                         run_id=state["run_id"],
-                        profile=profile,
-                        blueprint=blueprint,
-                        plan=plan,
-                        source_context=source_context,
+                        profile=request.profile,
+                        blueprint=request.blueprint,
+                        plan=request.plan,
+                        source_context=request.source_context,
                     )
                     break
                 except httpx.HTTPError:
@@ -522,21 +788,57 @@ class ExamAgentWorkflow:
             bundle_artifact = self.artifacts.write_json(
                 state["run_id"],
                 "question-bundle.json",
-                bundle.model_dump(mode="json"),
+                outcome.bundle.model_dump(mode="json"),
                 created_by_phase="QUESTION_GENERATING",
             )
             return {
-                "bundle": bundle,
+                "bundle": outcome.bundle,
                 "bundle_artifact": bundle_artifact,
-                "output_artifact_ids": [plan_artifact.id, bundle_artifact.id],
+                "requires_human_review": outcome.requires_human_review,
+                "output_artifact_ids": [
+                    request_artifact.id,
+                    plan_artifact.id,
+                    bundle_artifact.id,
+                ],
+                "_checkpoint_artifacts": {
+                    "request": request_artifact.id,
+                    "plan": plan_artifact.id,
+                    "bundle": bundle_artifact.id,
+                },
             }
 
-        return await WorkflowEngine(self.runs).execute(
+        steps: list[tuple[str, Step]] = [("QUESTION_GENERATING", generate_child)]
+        engine = WorkflowEngine(self.runs)
+        if resume_run_id is not None:
+            return await engine.resume(
+                resume_run_id,
+                "exam_question_generation",
+                steps,
+                context=restored_state,
+                parent_run_id=request.parent_run_id,
+            )
+        return await engine.execute(
             "exam_question_generation",
-            [("QUESTION_GENERATING", generate_child)],
-            parent_run_id=parent_run_id,
+            steps,
+            parent_run_id=request.parent_run_id,
             on_run_created=on_run_created,
         )
+
+    def _restore_question_state(self, checkpoint: WorkflowCheckpoint) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "_checkpoint_artifacts": dict(checkpoint.artifact_bindings),
+            "input_artifact_ids": list(checkpoint.artifact_bindings.values()),
+        }
+        bundle_artifact_id = checkpoint.artifact_bindings.get("bundle")
+        if bundle_artifact_id is not None:
+            state["bundle"] = ExamQuestionBundle.model_validate(
+                self.artifacts.read_json(bundle_artifact_id)
+            )
+            bundle_artifact = self.artifacts.get(bundle_artifact_id)
+            if bundle_artifact is None:
+                raise ValueError(f"bundle artifact metadata is missing: {bundle_artifact_id}")
+            state["bundle_artifact"] = bundle_artifact
+        return state
 
     async def _generate_question(
         self,
@@ -546,7 +848,7 @@ class ExamAgentWorkflow:
         blueprint: ExamBlueprint,
         plan: QuestionPlan,
         source_context: str,
-    ) -> ExamQuestionBundle:
+    ) -> QuestionGenerationOutcome:
         question_id = uuid4()
         solution_id = uuid4()
         rubric_id = uuid4()
@@ -729,8 +1031,13 @@ class ExamAgentWorkflow:
             decision = await self._arbitrate(run_id, plan, bundle, reports)
             self._persist_attempt(run_id, plan.number, attempt, bundle, reports, decision)
             if decision.action in {ArbitrationAction.PASS, ArbitrationAction.PASS_WITH_WARNINGS}:
-                return bundle
-            if decision.action in {ArbitrationAction.ABORT, ArbitrationAction.ESCALATE_HUMAN}:
+                return QuestionGenerationOutcome(
+                    bundle=bundle,
+                    requires_human_review=(decision.action is ArbitrationAction.PASS_WITH_WARNINGS),
+                )
+            if decision.action is ArbitrationAction.ESCALATE_HUMAN:
+                return QuestionGenerationOutcome(bundle=bundle, requires_human_review=True)
+            if decision.action is ArbitrationAction.ABORT:
                 raise RuntimeError(f"question {plan.number} arbitration: {decision.action}")
             feedback = {
                 "writer": decision.writer_feedback,

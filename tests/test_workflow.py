@@ -164,6 +164,45 @@ async def test_human_rejection_fails_run(tmp_path: Path) -> None:
     assert resolved.error == "incorrect"
 
 
+async def test_human_retry_returns_to_named_phase(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    engine = WorkflowEngine(store)
+    calls: list[str] = []
+
+    async def plan(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("plan")
+        return {}
+
+    async def review(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("review")
+        return {
+            "_human_review": {
+                "prompt": "Approve",
+                "retry_phase": "PLAN",
+            }
+        }
+
+    steps = [("PLAN", plan), ("REVIEW", review)]
+    run, _ = await engine.execute("reviewable", steps)
+    request = store.pending_human_review(run.id)
+    assert request is not None
+    store.resolve_human_review(
+        HumanDecision(
+            request_id=request.id,
+            run_id=run.id,
+            decision=HumanDecisionType.RETRY,
+            actor="tester",
+        )
+    )
+
+    resumed, _ = await engine.resume(run.id, "reviewable", steps)
+
+    assert resumed.status is RunStatus.WAITING_HUMAN
+    assert calls == ["plan", "review", "plan", "review"]
+
+
 async def test_cooperative_cancel_stops_before_next_step(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()

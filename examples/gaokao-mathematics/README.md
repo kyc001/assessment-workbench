@@ -21,3 +21,12 @@ uv run assessment-workbench exams generate `
 ```
 
 该命令会触发 19 道题的完整动态生成和审核链，模型调用数量较多。自动化测试只使用小型类型化 fixture 验证预设分支，不会运行完整真实模型整卷。
+
+CLI 默认在整卷组装后暂停，确认产物后继续：
+
+```powershell
+uv run assessment-workbench runs approve <run-id> --workspace workspaces/gaokao-math-demo
+uv run assessment-workbench runs resume <run-id> --workspace workspaces/gaokao-math-demo
+```
+
+无人值守的验收运行可以在生成命令中增加 `--no-human-gates`。该选项只关闭人工暂停，不会关闭题目审核、仲裁或确定性校验。

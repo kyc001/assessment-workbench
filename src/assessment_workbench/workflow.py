@@ -47,6 +47,7 @@ class WorkflowEngine:
         workflow: str,
         steps: list[tuple[str, Step]],
         *,
+        context: dict[str, Any] | None = None,
         parent_run_id: UUID | None = None,
         parent_event_id: UUID | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
@@ -60,7 +61,14 @@ class WorkflowEngine:
         checkpoint = self.store.get_checkpoint(run_id)
         if checkpoint is None:
             raise ValueError(f"run has no checkpoint: {run_id}")
+        if checkpoint.next_step_index > len(steps):
+            raise ValueError(
+                f"checkpoint step index {checkpoint.next_step_index} exceeds workflow length"
+            )
         state: dict[str, Any] = dict(checkpoint.context)
+        state.update(context or {})
+        state["_checkpoint_artifacts"] = dict(checkpoint.artifact_bindings)
+        state["_checkpoint_child_run_ids"] = list(checkpoint.child_run_ids)
         state["run_id"] = run.id
         self.store.transition(run, RunStatus.RUNNING)
         self.store.claim(run, os.getpid())
@@ -106,7 +114,21 @@ class WorkflowEngine:
                 )
                 try:
                     updates = await step(state)
+                    artifact_updates = _artifact_bindings(
+                        updates.pop("_checkpoint_artifacts", None)
+                    )
+                    child_run_updates = _child_run_ids(
+                        updates.pop("_checkpoint_child_run_ids", None)
+                    )
                     state.update(updates)
+                    artifact_bindings = _artifact_bindings(state.get("_checkpoint_artifacts"))
+                    artifact_bindings.update(artifact_updates)
+                    state["_checkpoint_artifacts"] = artifact_bindings
+                    child_run_ids = _child_run_ids(state.get("_checkpoint_child_run_ids"))
+                    for child_run_id in child_run_updates:
+                        if child_run_id not in child_run_ids:
+                            child_run_ids.append(child_run_id)
+                    state["_checkpoint_child_run_ids"] = child_run_ids
                 except Exception as exc:
                     self.store.append_event(
                         PhaseEvent(
@@ -143,24 +165,42 @@ class WorkflowEngine:
                 )
                 if self._cancel_if_requested(run):
                     return run, state
+                human_review = state.pop("_human_review", None)
+                resume_step_index = step_index + 1
+                retry_step_index = step_index
+                if isinstance(human_review, dict):
+                    resume_step_index = _review_step_index(
+                        steps,
+                        human_review.get("resume_phase"),
+                        default=resume_step_index,
+                    )
+                    retry_step_index = _review_step_index(
+                        steps,
+                        human_review.get("retry_phase"),
+                        default=retry_step_index,
+                    )
                 self.store.save_checkpoint(
                     WorkflowCheckpoint(
                         run_id=run.id,
                         workflow=run.workflow,
-                        next_step_index=step_index + 1,
+                        next_step_index=resume_step_index,
                         context=_checkpoint_context(state),
+                        artifact_bindings=_artifact_bindings(state.get("_checkpoint_artifacts")),
+                        child_run_ids=_child_run_ids(state.get("_checkpoint_child_run_ids")),
                     )
                 )
-                human_review = state.pop("_human_review", None)
                 if isinstance(human_review, dict):
                     request = HumanReviewRequest(
                         run_id=run.id,
                         phase=phase,
                         prompt=str(human_review.get("prompt", "Review required")),
                         artifact_ids=_artifact_ids(human_review.get("artifact_ids")),
+                        resume_step_index=resume_step_index,
+                        retry_step_index=retry_step_index,
                     )
                     self.store.create_human_review(request)
                     self.store.transition(run, RunStatus.WAITING_HUMAN)
+                    self.store.release(run)
                     state["human_review_request_id"] = str(request.id)
                     return run, state
         except (KeyboardInterrupt, SystemExit):
@@ -204,7 +244,7 @@ def _checkpoint_context(
 ) -> dict[str, str | int | float | bool | None | list[str]]:
     context: dict[str, str | int | float | bool | None | list[str]] = {}
     for key, value in state.items():
-        if key == "run_id":
+        if key == "run_id" or key.startswith("_checkpoint_"):
             continue
         if value is None or isinstance(value, (str, int, float, bool)):
             context[key] = value
@@ -213,3 +253,45 @@ def _checkpoint_context(
         elif isinstance(value, list) and all(isinstance(item, str) for item in value):
             context[key] = value
     return context
+
+
+def _artifact_bindings(value: object) -> dict[str, UUID]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, UUID] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(item, UUID):
+            result[key] = item
+        elif isinstance(item, str):
+            result[key] = UUID(item)
+    return result
+
+
+def _child_run_ids(value: object) -> list[UUID]:
+    if not isinstance(value, list):
+        return []
+    result: list[UUID] = []
+    for item in value:
+        if isinstance(item, UUID):
+            result.append(item)
+        elif isinstance(item, str):
+            result.append(UUID(item))
+    return result
+
+
+def _review_step_index(
+    steps: list[tuple[str, Step]],
+    phase: object,
+    *,
+    default: int,
+) -> int:
+    if phase is None:
+        return default
+    if not isinstance(phase, str):
+        raise ValueError("human review phase target must be a string")
+    for index, (candidate, _) in enumerate(steps):
+        if candidate == phase:
+            return index
+    raise ValueError(f"human review phase target does not exist: {phase}")

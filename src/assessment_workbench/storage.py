@@ -201,6 +201,15 @@ class RunStore:
             raise KeyError(f"run not found: {decision.run_id}")
         if run.status is not RunStatus.WAITING_HUMAN:
             raise ValueError(f"run is not waiting for human review: {run.status}")
+        checkpoint: WorkflowCheckpoint | None = None
+        if decision.decision in {
+            HumanDecisionType.ACCEPT,
+            HumanDecisionType.EDIT_ACCEPT,
+            HumanDecisionType.RETRY,
+        }:
+            checkpoint = self.get_checkpoint(decision.run_id)
+            if checkpoint is None:
+                raise ValueError(f"run has no checkpoint for human decision: {decision.run_id}")
         request.resolved_at = now_utc()
         with self.workspace.connect() as connection:
             connection.execute(
@@ -226,6 +235,19 @@ class RunStore:
             HumanDecisionType.EDIT_ACCEPT,
             HumanDecisionType.RETRY,
         }:
+            assert checkpoint is not None
+            legacy_request = request.resume_step_index == request.retry_step_index == 0
+            if decision.decision is HumanDecisionType.RETRY:
+                checkpoint.next_step_index = (
+                    max(0, checkpoint.next_step_index - 1)
+                    if legacy_request
+                    else request.retry_step_index
+                )
+            elif not legacy_request:
+                checkpoint.next_step_index = request.resume_step_index
+            checkpoint.human_decision_id = decision.id
+            checkpoint.created_at = now_utc()
+            self.save_checkpoint(checkpoint)
             return self.transition(run, RunStatus.INTERRUPTED)
         if decision.decision is HumanDecisionType.REJECT:
             return self.transition(run, RunStatus.FAILED, error=decision.reason or "human rejected")
@@ -579,6 +601,15 @@ class ArtifactStore:
             ).fetchone()
         return ArtifactRef.model_validate_json(row["payload"]) if row else None
 
+    def latest(self, run_id: UUID, logical_name: str) -> ArtifactRef | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                """SELECT payload FROM artifacts
+                WHERE run_id=? AND logical_name=? ORDER BY version DESC LIMIT 1""",
+                (str(run_id), logical_name),
+            ).fetchone()
+        return ArtifactRef.model_validate_json(row["payload"]) if row else None
+
     def read_bytes(self, artifact_id: UUID) -> bytes:
         artifact = self.get(artifact_id)
         if artifact is None:
@@ -588,6 +619,16 @@ class ArtifactStore:
         if hashlib.sha256(content).hexdigest() != artifact.sha256:
             raise ValueError(f"artifact integrity check failed: {artifact_id}")
         return content
+
+    def read_json(self, artifact_id: UUID) -> object:
+        return json.loads(self.read_bytes(artifact_id))
+
+    def read_editable_json(self, parent_run_id: UUID, relative_name: str) -> object:
+        root = (self.workspace.root / "editable" / str(parent_run_id)).resolve()
+        source = (root / relative_name).resolve()
+        if root != source and root not in source.parents:
+            raise ValueError("editable path escapes the parent run directory")
+        return json.loads(source.read_text(encoding="utf-8"))
 
     def verify(self, artifact_id: UUID) -> bool:
         try:
@@ -702,11 +743,32 @@ def _migrate_runs(connection: sqlite3.Connection) -> None:
 def _pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_pid_exists(pid)
     try:
         os.kill(pid, 0)
     except OSError:
         return False
     return True
+
+
+def _windows_pid_exists(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _merge_point(existing: KnowledgePoint, incoming: KnowledgePoint) -> KnowledgePoint:

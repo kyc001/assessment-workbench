@@ -15,6 +15,8 @@ from assessment_workbench.domain import (
     ExamBlueprint,
     ExamPlanningMode,
     ExamSectionBlueprint,
+    HumanDecision,
+    HumanDecisionType,
     QuestionDraft,
     QuestionPart,
     QuestionPlanDraft,
@@ -144,11 +146,34 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
     )
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()
-    run, state = await ExamAgentWorkflow(
+    runs = RunStore(workspace)
+    workflow = ExamAgentWorkflow(
         ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
         ArtifactStore(workspace),
-        RunStore(workspace),
-    ).execute(subject="mathematics", target_level="Grade 12", requirements="One question")
+        runs,
+    )
+    run, state = await workflow.execute(
+        subject="mathematics",
+        target_level="Grade 12",
+        requirements="One question",
+        require_blueprint_approval=True,
+    )
+
+    assert run.status is RunStatus.WAITING_HUMAN
+    assert strong.calls["subject_researcher"] == 1
+    assert strong.calls["exam_blueprint_planner"] == 1
+    assert strong.calls["question_set_planner"] == 0
+    request = runs.pending_human_review(run.id)
+    assert request is not None
+    runs.resolve_human_review(
+        HumanDecision(
+            request_id=request.id,
+            run_id=run.id,
+            decision=HumanDecisionType.ACCEPT,
+            actor="tester",
+        )
+    )
+    run, state = await workflow.resume(run.id)
 
     assert run.status is RunStatus.SUCCEEDED
     assert state["planning"].mode is ExamPlanningMode.AGENT
@@ -236,24 +261,43 @@ async def test_exam_agents_use_locked_preset_without_replanning(tmp_path: Path) 
     workspace = Workspace(tmp_path / "workspace")
     workspace.initialize()
     artifacts = ArtifactStore(workspace)
-    run, state = await ExamAgentWorkflow(
+    runs = RunStore(workspace)
+    workflow = ExamAgentWorkflow(
         ModelRouter(standard=standard, strong=strong),  # type: ignore[arg-type]
         artifacts,
-        RunStore(workspace),
-    ).execute(
+        runs,
+    )
+    run, state = await workflow.execute(
         subject="mathematics",
         target_level="Grade 12",
         requirements="One question",
         subject_profile=profile,
         blueprint=blueprint,
+        require_exam_approval=True,
     )
 
-    assert run.status is RunStatus.SUCCEEDED
+    assert run.status is RunStatus.WAITING_HUMAN
     assert state["planning"].mode is ExamPlanningMode.PRESET
     assert strong.calls["subject_researcher"] == 0
     assert strong.calls["exam_blueprint_planner"] == 0
     assert strong.calls["question_set_planner"] == 1
     assert state["exam"].questions[0].question.score == 10
+    request = runs.pending_human_review(run.id)
+    assert request is not None
+    runs.resolve_human_review(
+        HumanDecision(
+            request_id=request.id,
+            run_id=run.id,
+            decision=HumanDecisionType.ACCEPT,
+            actor="tester",
+        )
+    )
+    run, state = await workflow.resume(run.id)
+
+    assert run.status is RunStatus.SUCCEEDED
+    assert standard.calls["question_writer"] == 1
+    assert strong.calls["independent_solver"] == 1
+    assert standard.calls["rubric_builder"] == 1
     planning_artifact = next(
         artifact
         for artifact in artifacts.list(run.id)

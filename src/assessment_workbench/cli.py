@@ -108,13 +108,20 @@ def _latest_artifact_json(
     run_id: UUID,
     logical_name: str,
 ) -> Any:
-    matches = [
-        artifact for artifact in artifacts.list(run_id) if artifact.logical_name == logical_name
-    ]
-    if not matches:
+    latest = artifacts.latest(run_id, logical_name)
+    if latest is None:
         raise KeyError(f"artifact not found for run {run_id}: {logical_name}")
-    latest = max(matches, key=lambda artifact: artifact.version)
-    return json.loads(artifacts.read_bytes(latest.id))
+    return artifacts.read_json(latest.id)
+
+
+def _echo_human_review(run_id: UUID, store: RunStore) -> None:
+    request = store.pending_human_review(run_id)
+    if request is None:
+        return
+    typer.echo(f"Review: {request.prompt}")
+    typer.echo(f"Approve: assessment-workbench runs approve {run_id}")
+    typer.echo(f"Retry: assessment-workbench runs retry {run_id}")
+    typer.echo(f"Continue after decision: assessment-workbench runs resume {run_id}")
 
 
 @workspace_app.command("init")
@@ -334,6 +341,52 @@ def cancel_run(
     typer.echo(f"Status: {run.status}")
 
 
+@runs_app.command("resume")
+def resume_run(
+    run_id: UUID,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    store = RunStore(workspace)
+    run = store.get(run_id)
+    if run is None:
+        typer.echo(f"Run not found: {run_id}", err=True)
+        raise typer.Exit(1)
+    if run.status is RunStatus.WAITING_HUMAN:
+        typer.echo(f"Run is waiting for a human decision: {run_id}", err=True)
+        _echo_human_review(run_id, store)
+        raise typer.Exit(1)
+
+    workflow = _exam_workflow(workspace, Settings(), compile_pdf=True)
+    try:
+        if run.workflow == "exam_agent_generation":
+            resumed, state = asyncio.run(workflow.resume(run_id))
+        elif run.workflow == "exam_question_generation":
+            resumed, state = asyncio.run(workflow.resume_question_run(run_id))
+        else:
+            raise ValueError(f"workflow does not have a registered resume handler: {run.workflow}")
+    except (KeyError, OSError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Run: {resumed.id}")
+    typer.echo(f"Status: {resumed.status}")
+    if resumed.status is RunStatus.WAITING_HUMAN:
+        _echo_human_review(resumed.id, store)
+        return
+    if resumed.status is not RunStatus.SUCCEEDED:
+        typer.echo(f"Error: {resumed.error or 'workflow ended without success'}", err=True)
+        raise typer.Exit(1)
+    if resumed.workflow == "exam_agent_generation":
+        exam = state.get("exam")
+        if isinstance(exam, ExamDocument):
+            typer.echo(f"Questions: {len(exam.questions)}")
+            typer.echo(f"Total score: {exam.total_score}")
+        for artifact in state.get("artifacts", []):
+            if isinstance(artifact, ArtifactRef):
+                typer.echo(f"Artifact: {workspace.root / artifact.path}")
+
+
 def _resolve_human(
     run_id: UUID,
     decision_type: HumanDecisionType,
@@ -417,6 +470,13 @@ def generate_exam(
         Path | None,
         typer.Option("--blueprint", help="Optional locked exam blueprint YAML"),
     ] = None,
+    human_gates: Annotated[
+        bool,
+        typer.Option(
+            "--human-gates/--no-human-gates",
+            help="Pause for generated-blueprint and final-exam approval",
+        ),
+    ] = True,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     if source is not None and not source.is_file():
@@ -447,10 +507,15 @@ def generate_exam(
             source_context=source.read_text(encoding="utf-8") if source else "",
             subject_profile=subject_profile,
             blueprint=blueprint,
+            require_blueprint_approval=human_gates and subject_profile is None,
+            require_exam_approval=human_gates,
             on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
         )
     )
     typer.echo(f"Status: {run.status}")
+    if run.status is RunStatus.WAITING_HUMAN:
+        _echo_human_review(run.id, RunStore(workspace))
+        return
     if run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {run.error or 'workflow ended without success'}", err=True)
         raise typer.Exit(1)

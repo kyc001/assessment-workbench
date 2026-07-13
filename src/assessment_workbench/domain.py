@@ -725,6 +725,31 @@ class ArbitrationDecision(StrictModel):
     rubric_feedback: list[str] = Field(default_factory=list)
 
 
+class ExamGenerationRequest(BaseModel):
+    subject: str
+    target_level: str
+    requirements: str
+    source_context: str = ""
+    subject_profile: SubjectProfile | None = None
+    blueprint: ExamBlueprint | None = None
+    require_blueprint_approval: bool = False
+    require_exam_approval: bool = False
+
+    @model_validator(mode="after")
+    def validate_preset_pair(self) -> "ExamGenerationRequest":
+        if (self.subject_profile is None) != (self.blueprint is None):
+            raise ValueError("subject_profile and blueprint must be provided together")
+        return self
+
+
+class QuestionGenerationRequest(BaseModel):
+    profile: SubjectProfile
+    blueprint: ExamBlueprint
+    plan: QuestionPlan
+    source_context: str = ""
+    parent_run_id: UUID | None = None
+
+
 class ModelUsage(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
@@ -814,7 +839,10 @@ class WorkflowCheckpoint(BaseModel):
     run_id: UUID
     workflow: str
     next_step_index: int = Field(ge=0)
-    context: dict[str, str | int | float | bool | None | list[str]]
+    context: dict[str, str | int | float | bool | None | list[str]] = Field(default_factory=dict)
+    artifact_bindings: dict[str, UUID] = Field(default_factory=dict)
+    child_run_ids: list[UUID] = Field(default_factory=list)
+    human_decision_id: UUID | None = None
     created_at: datetime = Field(default_factory=now_utc)
 
 
@@ -832,6 +860,8 @@ class HumanReviewRequest(BaseModel):
     phase: str
     prompt: str
     artifact_ids: list[UUID] = Field(default_factory=list)
+    resume_step_index: int = Field(default=0, ge=0)
+    retry_step_index: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=now_utc)
     resolved_at: datetime | None = None
 
