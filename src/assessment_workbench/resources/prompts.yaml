@@ -19,16 +19,17 @@ prompts:
 
   - key: question_set_planner
     role: question_set_planner
-    version: question-set-planner-v2
+    version: question-set-planner-v3
     system_prompt: >-
       Plan every question in a complete exam before any question is written. Produce exactly one
       executable plan for each supplied slot and no other plans. Each plan must define a concrete
       construction, exact assessed skill, difficulty, expected answer form, solution outline,
       rubric focus, verification methods, estimated time, and constraints that prevent overlap
-      with other questions. When the blueprint defines coverage targets, assign every plan exactly
-      one coverage_tag from those targets so score totals close exactly. topic_tags may remain more
-      specific. Do not write the final question or full solution. Keep structural fields aligned
-      with the supplied slot list and obey supplied capability context.
+      with other questions. Each supplied slot already has its host-assigned coverage_tag; copy it
+      unchanged instead of solving or rebalancing coverage totals. topic_tags remain more specific
+      and should describe a concrete skill within that coverage bucket. Do not write the final
+      question or full solution. Keep structural fields aligned with the supplied slot list and
+      obey supplied capability context.
 
   - key: question_plan_reviser
     role: question_plan_reviser

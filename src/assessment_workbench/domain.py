@@ -675,6 +675,16 @@ class QuestionSlot(BaseModel):
     question_type: QuestionType
     score: int = Field(ge=1)
     topic_tags: list[str] = Field(default_factory=list)
+    coverage_tag: str | None = None
+
+
+class QuestionPlanningProgress(StrictModel):
+    blueprint_id: str = Field(min_length=1)
+    blueprint_version: str = Field(min_length=1)
+    next_attempt: int = Field(ge=1)
+    validation_feedback: list[str] = Field(default_factory=list)
+    draft_artifact_ids: list[UUID] = Field(default_factory=list)
+    validation_artifact_ids: list[UUID] = Field(default_factory=list)
 
 
 class QuestionPlan(BaseModel):

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
@@ -67,6 +68,13 @@ def _workspace(path: Path | None) -> Workspace:
     workspace.require_initialized()
     RunStore(workspace).recover_orphaned()
     return workspace
+
+
+def _console_safe(value: object, *, err: bool = False) -> str:
+    text = str(value)
+    stream = sys.stderr if err else sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    return text.encode(encoding, errors="replace").decode(encoding)
 
 
 def _exam_workflow(
@@ -654,7 +662,7 @@ def show_exam_question_status(
         editable = record.get("editable_path") or "-"
         if editable != "-":
             editable = str(workspace.root / str(editable))
-        error = str(record.get("error") or "").replace("\n", " ")
+        error = _console_safe(record.get("error") or "").replace("\n", " ")
         typer.echo(
             f"{record.get('question_number', '-')}\t{status}\t{child_id or '-'}\t"
             f"{editable}\t{error}"
@@ -694,7 +702,7 @@ def show_exam_document_status(
             artifacts,
             latest_record.inspection_artifact_id,
         )
-        error = (latest_record.error or "").replace("\n", " ")
+        error = _console_safe(latest_record.error or "").replace("\n", " ")
         typer.echo(
             f"{view}\t{latest_record.status}\t{latest_record.attempt}\t"
             f"{latest_record.run_id}\t"

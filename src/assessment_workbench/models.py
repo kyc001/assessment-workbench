@@ -65,6 +65,8 @@ class OpenAICompatibleModel:
                     "schema": _strict_schema(response_model.model_json_schema()),
                 },
             },
+            "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": 0,
         }
         request_sha256 = _sha(request)
@@ -131,16 +133,17 @@ class OpenAICompatibleModel:
         ):
             for attempt in range(3):
                 try:
-                    response = await client.post(
+                    async with client.stream(
+                        "POST",
                         f"{self.base_url}/chat/completions",
-                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        headers={
+                            "Accept": "text/event-stream",
+                            "Authorization": f"Bearer {self.api_key}",
+                        },
                         json=request,
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                    if not isinstance(payload, dict):
-                        raise ValueError("model response payload is not an object")
-                    return payload
+                    ) as response:
+                        response.raise_for_status()
+                        return await _read_response_payload(response)
                 except (httpx.TimeoutException, httpx.NetworkError) as exc:
                     if attempt == 2:
                         raise RetryableWorkflowError(str(exc)) from exc
@@ -151,6 +154,62 @@ class OpenAICompatibleModel:
                         raise RetryableWorkflowError(str(exc)) from exc
                 await asyncio.sleep(0.5 * (2**attempt))
         raise RuntimeError("model request retry loop exited unexpectedly")
+
+
+async def _read_response_payload(response: httpx.Response) -> dict[str, Any]:
+    content_type = response.headers.get("content-type", "").casefold()
+    if "text/event-stream" not in content_type:
+        await response.aread()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("model response payload is not an object")
+        return payload
+
+    content_parts: list[str] = []
+    usage: dict[str, Any] = {}
+    provider_request_id: str | None = None
+    finish_reason: str | None = None
+    async for line in response.aiter_lines():
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if not data or data == "[DONE]":
+            continue
+        event = json.loads(data)
+        if not isinstance(event, dict):
+            raise ValueError("model stream event is not an object")
+        event_id = event.get("id")
+        if provider_request_id is None and isinstance(event_id, str):
+            provider_request_id = event_id
+        event_usage = event.get("usage")
+        if isinstance(event_usage, dict):
+            usage = event_usage
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        choice = choices[0]
+        choice_finish_reason = choice.get("finish_reason")
+        if isinstance(choice_finish_reason, str):
+            finish_reason = choice_finish_reason
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        if isinstance(content, str):
+            content_parts.append(content)
+
+    if not content_parts:
+        raise ValueError("model stream completed without response content")
+    return {
+        "id": provider_request_id,
+        "choices": [
+            {
+                "message": {"content": "".join(content_parts)},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage,
+    }
 
 
 def _sha(payload: dict[str, Any]) -> str:

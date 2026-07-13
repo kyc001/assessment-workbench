@@ -147,7 +147,28 @@ class RunStore:
         if not failed_events:
             raise ValueError(f"failed run has no failed phase event: {run_id}")
         failed = failed_events[-1]
-        if not is_retryable_failure(failed.error_code, failed.error):
+        retryable_child_run_ids: list[UUID] = []
+        retryable = is_retryable_failure(failed.error_code, failed.error)
+        if not retryable and failed.phase == "QUESTIONS_GENERATING":
+            child_runs = [
+                child
+                for child_id in self.child_run_ids(run.id)
+                if (child := self.get(child_id)) is not None
+            ]
+            retryable_child_run_ids = [
+                child.id
+                for child in child_runs
+                if child.status in {RunStatus.FAILED, RunStatus.INTERRUPTED}
+                and self._run_has_retryable_failure(child.id)
+            ]
+            nonrecoverable_children = [
+                child
+                for child in child_runs
+                if child.status is not RunStatus.SUCCEEDED
+                and child.id not in retryable_child_run_ids
+            ]
+            retryable = bool(retryable_child_run_ids) and not nonrecoverable_children
+        if not retryable:
             raise ValueError(f"failed run error is not retryable: {failed.error_code or 'unknown'}")
         validate_run_transition(run.status, RunStatus.INTERRUPTED)
         timestamp = now_utc()
@@ -166,6 +187,9 @@ class RunStore:
                 "failed_phase": failed.phase,
                 "failed_error_code": failed.error_code or "unknown",
                 "failed_error": failed.error or "",
+                "retryable_child_run_ids": ",".join(
+                    str(child_run_id) for child_run_id in retryable_child_run_ids
+                ),
             },
         )
         run.status = RunStatus.INTERRUPTED
@@ -383,6 +407,24 @@ class RunStore:
                 (str(run_id),),
             ).fetchall()
         return [_event_from_row(row) for row in rows]
+
+    def child_run_ids(self, parent_run_id: UUID) -> list[UUID]:
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT run_id FROM phase_events
+                WHERE parent_run_id=? ORDER BY run_id""",
+                (str(parent_run_id),),
+            ).fetchall()
+        return [UUID(str(row["run_id"])) for row in rows]
+
+    def _run_has_retryable_failure(self, run_id: UUID) -> bool:
+        failed_events = [
+            event for event in self.events(run_id) if event.status is PhaseStatus.FAILED
+        ]
+        if not failed_events:
+            return False
+        failed = failed_events[-1]
+        return is_retryable_failure(failed.error_code, failed.error)
 
     def descendant_run_ids(self, root_run_id: UUID) -> list[UUID]:
         discovered: list[UUID] = []

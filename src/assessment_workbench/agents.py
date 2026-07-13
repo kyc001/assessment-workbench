@@ -33,6 +33,7 @@ from assessment_workbench.domain import (
     QuestionGenerationRequest,
     QuestionPlan,
     QuestionPlanDraft,
+    QuestionPlanningProgress,
     QuestionPlanSetDraft,
     QuestionSlot,
     RunStatus,
@@ -41,7 +42,9 @@ from assessment_workbench.domain import (
     WorkflowCheckpoint,
     WorkflowRun,
 )
+from assessment_workbench.errors import RetryableWorkflowError
 from assessment_workbench.exam_quality import (
+    allocate_question_slot_coverage,
     validate_bundle_for_plan,
     validate_question_plan_coverage,
 )
@@ -404,7 +407,27 @@ class ExamAgentWorkflow:
             exam_blueprint: ExamBlueprint = state["blueprint"]
             slots = _blueprint_slots(exam_blueprint)
             planning_feedback: list[str] = []
-            for planning_attempt in range(3):
+            draft_artifact_ids: list[UUID] = []
+            validation_artifact_ids: list[UUID] = []
+            next_attempt = 1
+            progress_artifact = self.artifacts.latest(
+                state["run_id"], "question-planning-progress.json"
+            )
+            if progress_artifact is not None:
+                progress = QuestionPlanningProgress.model_validate(
+                    self.artifacts.read_json(progress_artifact.id)
+                )
+                if (
+                    progress.blueprint_id == exam_blueprint.id
+                    and progress.blueprint_version == exam_blueprint.version
+                ):
+                    next_attempt = progress.next_attempt
+                    planning_feedback = progress.validation_feedback
+                    draft_artifact_ids = progress.draft_artifact_ids
+                    validation_artifact_ids = progress.validation_artifact_ids
+                else:
+                    progress_artifact = None
+            for planning_attempt in range(next_attempt, 4):
                 prompt = self.prompts.require("question_set_planner")
                 draft = await complete_with_prompt(
                     self.models.strong,
@@ -422,18 +445,62 @@ class ExamAgentWorkflow:
                     run_id=state["run_id"],
                     artifacts=self.artifacts,
                     created_by_phase="QUESTION_PLANNING",
-                    input_artifact_ids=context_artifact_ids(state),
+                    input_artifact_ids=[
+                        *context_artifact_ids(state),
+                        *draft_artifact_ids,
+                        *validation_artifact_ids,
+                        *([progress_artifact.id] if progress_artifact is not None else []),
+                    ],
                 )
+                draft_artifact = self.artifacts.write_json(
+                    state["run_id"],
+                    "question-plan-draft.json",
+                    draft.model_dump(mode="json"),
+                    created_by_phase="QUESTION_PLANNING",
+                )
+                draft_artifact_ids.append(draft_artifact.id)
                 try:
                     question_plans = _materialize_question_plans(exam_blueprint, draft.plans)
                     break
                 except ValueError as exc:
-                    if planning_attempt == 2:
-                        raise
                     planning_feedback = [
                         "The previous plan set failed deterministic slot validation. Return "
                         f"exactly the supplied slots and no others. Error: {exc}"
                     ]
+                    validation_artifact = self.artifacts.write_json(
+                        state["run_id"],
+                        "question-plan-validation.json",
+                        {
+                            "blueprint_id": exam_blueprint.id,
+                            "blueprint_version": exam_blueprint.version,
+                            "attempt": planning_attempt,
+                            "draft_artifact_id": str(draft_artifact.id),
+                            "error": str(exc),
+                        },
+                        created_by_phase="QUESTION_PLANNING",
+                    )
+                    validation_artifact_ids.append(validation_artifact.id)
+                    progress = QuestionPlanningProgress(
+                        blueprint_id=exam_blueprint.id,
+                        blueprint_version=exam_blueprint.version,
+                        next_attempt=planning_attempt + 1,
+                        validation_feedback=planning_feedback,
+                        draft_artifact_ids=draft_artifact_ids,
+                        validation_artifact_ids=validation_artifact_ids,
+                    )
+                    progress_artifact = self.artifacts.write_json(
+                        state["run_id"],
+                        "question-planning-progress.json",
+                        progress.model_dump(mode="json"),
+                        created_by_phase="QUESTION_PLANNING",
+                    )
+                    state["output_artifact_ids"] = [
+                        *draft_artifact_ids,
+                        *validation_artifact_ids,
+                        progress_artifact.id,
+                    ]
+                    if planning_attempt == 3:
+                        raise
             else:
                 raise RuntimeError("question planning retry loop exited unexpectedly")
             artifact = self.artifacts.write_json(
@@ -444,7 +511,7 @@ class ExamAgentWorkflow:
             )
             return {
                 "question_plans": question_plans,
-                "output_artifact_ids": [artifact.id],
+                "output_artifact_ids": [artifact.id, *draft_artifact_ids],
                 "_checkpoint_artifacts": {"question_plans": artifact.id},
             }
 
@@ -607,7 +674,11 @@ class ExamAgentWorkflow:
                 async with semaphore:
                     await update_record(
                         plan.number,
-                        {**records_by_number[plan.number], "status": "running"},
+                        {
+                            **records_by_number[plan.number],
+                            "status": "running",
+                            "error": None,
+                        },
                         immutable_snapshot=False,
                     )
 
@@ -691,6 +762,7 @@ class ExamAgentWorkflow:
 
             child_results = await asyncio.gather(*(generate(plan) for plan in pending_plans))
             bundles: list[ExamQuestionBundle] = [item[0] for item in reused_results.values()]
+            interrupted_numbers: list[int] = []
             failed_numbers: list[int] = []
             child_artifact_ids: list[UUID] = [item[1].id for item in reused_results.values()]
             for plan, child_run, child_state in child_results:
@@ -703,6 +775,8 @@ class ExamAgentWorkflow:
                 ):
                     bundles.append(child_bundle)
                     child_artifact_ids.append(bundle_artifact.id)
+                elif child_run.status is RunStatus.INTERRUPTED:
+                    interrupted_numbers.append(plan.number)
                 else:
                     failed_numbers.append(plan.number)
 
@@ -714,6 +788,9 @@ class ExamAgentWorkflow:
                 child_records,
                 created_by_phase="QUESTIONS_GENERATING",
             )
+            if interrupted_numbers:
+                numbers = ", ".join(str(number) for number in interrupted_numbers)
+                raise RetryableWorkflowError(f"question child runs interrupted: {numbers}")
             if failed_numbers:
                 numbers = ", ".join(str(number) for number in failed_numbers)
                 raise RuntimeError(f"question child runs failed: {numbers}")
@@ -1142,7 +1219,7 @@ def _blueprint_slots(blueprint: ExamBlueprint) -> list[QuestionSlot]:
                 )
             )
             number += 1
-    return slots
+    return allocate_question_slot_coverage(blueprint, slots)
 
 
 def _materialize_question_plans(
@@ -1165,18 +1242,8 @@ def _materialize_question_plans(
         )
 
     plans: list[QuestionPlan] = []
-    coverage_tags = {target.topic_tag for target in blueprint.coverage}
     for slot in expected_slots:
         draft = received[(slot.section_id, slot.slot)]
-        coverage_tag = draft.coverage_tag
-        if coverage_tags and coverage_tag is None:
-            matching_tags = coverage_tags & set(draft.topic_tags)
-            if len(matching_tags) != 1:
-                raise ValueError(
-                    f"question planner must assign one coverage_tag for slot "
-                    f"{(slot.section_id, slot.slot)}"
-                )
-            coverage_tag = next(iter(matching_tags))
         plans.append(
             QuestionPlan(
                 id=f"{blueprint.id}:q{slot.number:02d}",
@@ -1185,7 +1252,7 @@ def _materialize_question_plans(
                 score=slot.score,
                 section_title=slot.section_title,
                 **draft.model_dump(exclude={"coverage_tag"}),
-                coverage_tag=coverage_tag,
+                coverage_tag=slot.coverage_tag,
             )
         )
     validate_question_plan_coverage(blueprint, plans)

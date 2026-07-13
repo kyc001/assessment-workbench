@@ -1,3 +1,5 @@
+import re
+
 from assessment_workbench.domain import (
     ExamContentBlock,
     ExamContentKind,
@@ -150,12 +152,25 @@ def render_content(blocks: list[ExamContentBlock], *, allow_display_math: bool =
 
 
 def _is_standalone_display(blocks: list[ExamContentBlock], index: int) -> bool:
+    if _is_short_embedded_math(blocks, index):
+        return False
     if index + 1 >= len(blocks):
         return True
     following = blocks[index + 1]
     if following.kind is not ExamContentKind.TEXT:
         return True
     return not following.content.lstrip().startswith(("，", "。", "；", "：", ",", ".", ";", ":"))
+
+
+def _is_short_embedded_math(blocks: list[ExamContentBlock], index: int) -> bool:
+    if index == 0 or index + 1 >= len(blocks):
+        return False
+    previous = blocks[index - 1]
+    following = blocks[index + 1]
+    if previous.kind is not ExamContentKind.TEXT or following.kind is not ExamContentKind.TEXT:
+        return False
+    content = blocks[index].content.strip()
+    return "\n" not in content and len(content) <= 32
 
 
 def _render_text(text: str) -> str:
@@ -208,4 +223,50 @@ def validate_math(expression: str) -> str:
         command in lowered for command in forbidden
     ):
         raise ValueError("unsafe LaTeX command in mathematical expression")
-    return expression
+    return _normalize_math(expression)
+
+
+def _normalize_math(expression: str) -> str:
+    normalized = expression
+    normalized = re.sub(r"\s*<=\s*", r" \\leq ", normalized)
+    normalized = re.sub(r"\s*>=\s*", r" \\geq ", normalized)
+    sqrt_pattern = re.compile(r"(?<![\\A-Za-z])sqrt\(([^()]*)\)")
+    while sqrt_pattern.search(normalized):
+        normalized = sqrt_pattern.sub(lambda match: rf"\sqrt{{{match.group(1)}}}", normalized)
+    normalized = re.sub(
+        r"(?P<value>(?:\d+(?:\.\d+)?|[A-Za-z]))\s*degrees\b",
+        lambda match: rf"{match.group('value')}^\circ",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?<![\\A-Za-z])(?P<name>sin|cos|tan|ln|log)(?=(?:\\?[A-Za-z]|\())",
+        lambda match: rf"\{match.group('name')} ",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?<!\\)\b(?P<name>sin|cos|tan|ln|log|det)\b",
+        lambda match: rf"\{match.group('name')}",
+        normalized,
+    )
+    normalized = re.sub(r"(?<!\\)\bpi\b", r"\\pi", normalized)
+    normalized = re.sub(r"(?<!\\)\binfinity\b", r"\\infty", normalized)
+    normalized = re.sub(r"(?<![\\A-Za-z])sum(?=_)", r"\\sum", normalized)
+    normalized = re.sub(r"(?<![\\A-Za-z])lim(?=[_(])", r"\\lim", normalized)
+    normalized = re.sub(r"(?<![\\A-Za-z])in(?=\s)", r"\\in", normalized)
+    normalized = re.sub(
+        r"(?P<operator>\\in\s*)\{(?P<members>[^{}]*)\}",
+        lambda match: rf"{match.group('operator')}\{{{match.group('members')}\}}",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?<=[0-9A-Za-z)\]}])\s*\*\s*(?=[0-9A-Za-z(\\])",
+        r" \\cdot ",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?P<prefix>[A-Za-z])_triangle(?P<vertices>[A-Za-z]+)",
+        lambda match: rf"{match.group('prefix')}_{{\triangle {match.group('vertices')}}}",
+        normalized,
+    )
+    normalized = re.sub(r"(?<!\\)\bangle\s+", r"\\angle ", normalized)
+    return normalized

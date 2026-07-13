@@ -1,4 +1,6 @@
+import re
 from collections.abc import Iterable
+from functools import cache
 from uuid import UUID
 
 from assessment_workbench.domain import (
@@ -14,8 +16,84 @@ from assessment_workbench.domain import (
     FindingSeverity,
     QuestionPlan,
     QuestionPlanDraft,
+    QuestionSlot,
     SubjectProfile,
 )
+
+
+def allocate_question_slot_coverage(
+    blueprint: ExamBlueprint,
+    slots: list[QuestionSlot],
+) -> list[QuestionSlot]:
+    if not blueprint.coverage:
+        return slots
+    targets = blueprint.coverage
+    if sum(slot.score for slot in slots) != sum(target.target_score for target in targets):
+        raise ValueError("slot scores do not match coverage target scores")
+    indexed_slots = sorted(
+        enumerate(slots),
+        key=lambda item: (-item[1].score, item[1].number),
+    )
+    affinities = [
+        [_coverage_affinity(slot, target.topic_tag) for target in targets]
+        for _, slot in indexed_slots
+    ]
+
+    @cache
+    def solve(
+        position: int,
+        remaining: tuple[int, ...],
+    ) -> tuple[int, tuple[int, ...]] | None:
+        if position == len(indexed_slots):
+            return (0, ()) if all(score == 0 for score in remaining) else None
+        slot = indexed_slots[position][1]
+        best: tuple[int, tuple[int, ...]] | None = None
+        for target_index, available in enumerate(remaining):
+            if available < slot.score:
+                continue
+            updated = list(remaining)
+            updated[target_index] -= slot.score
+            child = solve(position + 1, tuple(updated))
+            if child is None:
+                continue
+            candidate = (
+                affinities[position][target_index] + child[0],
+                (target_index, *child[1]),
+            )
+            if (
+                best is None
+                or candidate[0] > best[0]
+                or (candidate[0] == best[0] and candidate[1] < best[1])
+            ):
+                best = candidate
+        return best
+
+    solution = solve(0, tuple(target.target_score for target in targets))
+    if solution is None:
+        scores = [slot.score for slot in slots]
+        target_scores = [target.target_score for target in targets]
+        raise ValueError(
+            f"blueprint coverage cannot be partitioned across slots: "
+            f"scores={scores}, targets={target_scores}"
+        )
+    assignments: list[str | None] = [None] * len(slots)
+    for (original_index, _), target_index in zip(indexed_slots, solution[1], strict=True):
+        assignments[original_index] = targets[target_index].topic_tag
+    return [
+        slot.model_copy(update={"coverage_tag": assignments[index]})
+        for index, slot in enumerate(slots)
+    ]
+
+
+def _coverage_affinity(slot: QuestionSlot, coverage_tag: str) -> int:
+    source = " ".join([slot.section_title, *slot.topic_tags]).casefold()
+    terms = [
+        term
+        for term in re.split(r"[与和及、,，/;；\s]+", coverage_tag.casefold())
+        if len(term) >= 2
+    ]
+    matched_terms = sum(1 for term in terms if term in source)
+    return matched_terms * (slot.score * 100 + slot.score**2)
 
 
 def exam_bundle_signature(exam: ExamDocument) -> ExamBundleVersionSignature:
@@ -220,8 +298,7 @@ def validate_exam_review_report(
             FindingSeverity.ERROR,
             FindingSeverity.FATAL,
         }
-    if report.passed == has_blocking:
-        raise ValueError("exam review passed flag must equal the absence of blocking findings")
+    report.passed = not has_blocking
 
 
 def merge_revised_question_plans(
