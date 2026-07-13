@@ -85,7 +85,10 @@ class GenericLatexRenderer:
             f"\\awquestion{{{question_title}}}",
             render_content(question.statement),
         ]
-        if question.question_type is QuestionType.MULTIPLE_CHOICE:
+        if question.question_type in {
+            QuestionType.MULTIPLE_CHOICE,
+            QuestionType.MULTIPLE_SELECT,
+        }:
             lines.append("\\begin{enumerate}[label=\\Alph*.]")
             lines.extend(
                 f"\\item {render_content(option, allow_display_math=False)}"

@@ -3,6 +3,7 @@ display_name: 高考数学
 version: "1"
 supported_question_types:
   - multiple_choice
+  - multiple_select
   - fill_blank
   - constructed_response
   - calculation

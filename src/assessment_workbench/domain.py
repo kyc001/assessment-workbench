@@ -162,6 +162,7 @@ class RetrievalHit(BaseModel):
 
 class QuestionType(StrEnum):
     MULTIPLE_CHOICE = "multiple_choice"
+    MULTIPLE_SELECT = "multiple_select"
     FILL_BLANK = "fill_blank"
     CONSTRUCTED_RESPONSE = "constructed_response"
     CALCULATION = "calculation"
@@ -248,6 +249,8 @@ class SubjectProfile(BaseModel):
     tools: list[str] = Field(default_factory=list)
     latex_template: str
     difficulty_dimensions: list[str] = Field(min_length=1)
+    conventions: list[str] = Field(default_factory=list)
+    source_summary: str = ""
     version: str = "1"
 
 
@@ -331,6 +334,7 @@ class ExamBlueprint(BaseModel):
 
 class ExamPlanningMode(StrEnum):
     AGENT = "agent"
+    CAPABILITY = "capability"
     PRESET = "preset"
 
 
@@ -340,6 +344,14 @@ class ExamPlanningRecord(BaseModel):
     subject_profile_version: str
     blueprint_id: str
     blueprint_version: str
+    capability_id: str | None = None
+    capability_version: str | None = None
+
+    @model_validator(mode="after")
+    def validate_capability_pair(self) -> "ExamPlanningRecord":
+        if (self.capability_id is None) != (self.capability_version is None):
+            raise ValueError("capability_id and capability_version must be provided together")
+        return self
 
 
 class DifficultyProfile(BaseModel):
@@ -398,10 +410,11 @@ class QuestionVersion(BaseModel):
 
     @model_validator(mode="after")
     def validate_options(self) -> "QuestionVersion":
-        if self.question_type is QuestionType.MULTIPLE_CHOICE and len(self.options) < 4:
-            raise ValueError("multiple-choice questions require at least four options")
-        if self.question_type is not QuestionType.MULTIPLE_CHOICE and self.options:
-            raise ValueError("only multiple-choice questions may define options")
+        choice_types = {QuestionType.MULTIPLE_CHOICE, QuestionType.MULTIPLE_SELECT}
+        if self.question_type in choice_types and len(self.options) < 4:
+            raise ValueError("choice questions require at least four options")
+        if self.question_type not in choice_types and self.options:
+            raise ValueError("only choice questions may define options")
         for index, option in enumerate(self.options):
             if not option or option[0].kind is not ExamContentKind.TEXT:
                 continue
@@ -573,7 +586,7 @@ class SubjectProfileCandidate(StrictModel):
     subject_id: str
     display_name: str
     supported_question_types: list[QuestionType] = Field(min_length=1)
-    reviewers: list[ReviewerName] = Field(min_length=1)
+    reviewers: list[str] = Field(min_length=1)
     tools: list[str] = Field(default_factory=list)
     difficulty_dimensions: list[str] = Field(min_length=1)
     conventions: list[str] = Field(default_factory=list)
@@ -732,6 +745,9 @@ class ExamGenerationRequest(BaseModel):
     source_context: str = ""
     subject_profile: SubjectProfile | None = None
     blueprint: ExamBlueprint | None = None
+    capability_id: str | None = None
+    capability_version: str | None = None
+    capability_context: dict[str, list[str]] = Field(default_factory=dict)
     require_blueprint_approval: bool = False
     require_exam_approval: bool = False
 
@@ -739,6 +755,10 @@ class ExamGenerationRequest(BaseModel):
     def validate_preset_pair(self) -> "ExamGenerationRequest":
         if (self.subject_profile is None) != (self.blueprint is None):
             raise ValueError("subject_profile and blueprint must be provided together")
+        if (self.capability_id is None) != (self.capability_version is None):
+            raise ValueError("capability_id and capability_version must be provided together")
+        if self.capability_id is not None and self.subject_profile is None:
+            raise ValueError("capability requests require a subject_profile and blueprint")
         return self
 
 
@@ -748,6 +768,15 @@ class QuestionGenerationRequest(BaseModel):
     plan: QuestionPlan
     source_context: str = ""
     parent_run_id: UUID | None = None
+    capability_id: str | None = None
+    capability_version: str | None = None
+    capability_context: dict[str, list[str]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_capability_pair(self) -> "QuestionGenerationRequest":
+        if (self.capability_id is None) != (self.capability_version is None):
+            raise ValueError("capability_id and capability_version must be provided together")
+        return self
 
 
 class ModelUsage(BaseModel):

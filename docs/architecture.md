@@ -57,6 +57,27 @@ CLI
 
 知识抽取只有引用现有 `source_block_ids` 的节点和关系才会物化到课程图谱。
 
+## Prompt 与科目能力注册表
+
+考试生成链不再在工作流中维护 Prompt 文本或 Reviewer 名称集合：
+
+```text
+PromptRegistry
+  -> PromptBundle(key, role, version, system_prompt)
+
+CapabilityCatalog
+  -> ReviewerRegistry
+  -> ToolRegistry
+  -> ValidatorRegistry
+  -> SubjectCapabilityRegistry
+```
+
+工作流从同一个 `PromptBundle` 取得模型角色、系统 Prompt 和版本号，模型调用审计与 `GenerationMetadata` 因而不会和真实 Prompt 版本漂移。科目 Profile 在进入命题前必须通过 Reviewer、Tool 和 Validator 引用校验。
+
+明确的 `高考数学` 请求会解析到内置能力包，锁定 19 题、150 分、120 分钟及 8 道单选、3 道多选、3 道填空、5 道解答题的结构。能力包只保存结构和行为规则，不保存题目、答案或 Rubric。未命中能力包的科目仍由 Subject Research Agent 和 Blueprint Agent 动态生成结构，再通过相同 Registry 校验。
+
+解析优先级为：显式 Profile/Blueprint > 内置 Subject Capability > Agent 动态研究。能力包 ID/版本写入规划 Artifact，Prompt 版本写入每次模型调用和题目版本元数据。
+
 ## 轻量检索
 
 当前 `LocalKnowledgeBackend` 提供：

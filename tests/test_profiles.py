@@ -23,6 +23,7 @@ def test_loads_gaokao_mathematics_profile_and_blueprint() -> None:
     assert sum(section.total_score for section in blueprint.sections) == 150
     assert sum(section.count for section in blueprint.sections) == 19
     assert [section.count for section in blueprint.sections] == [8, 3, 3, 5]
+    assert blueprint.sections[1].question_type is QuestionType.MULTIPLE_SELECT
     assert blueprint.sections[-1].question_type is QuestionType.CONSTRUCTED_RESPONSE
     assert blueprint.sections[-1].resolved_scores == [13, 15, 15, 17, 17]
 

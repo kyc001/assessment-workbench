@@ -19,7 +19,7 @@ sections:
       - 概率统计
   - id: multiple-choice
     title: 多项选择题
-    question_type: multiple_choice
+    question_type: multiple_select
     count: 3
     score_each: 6
     topic_tags:

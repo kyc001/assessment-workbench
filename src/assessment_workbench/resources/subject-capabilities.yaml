@@ -1,0 +1,104 @@
+capabilities:
+  - id: gaokao-mathematics
+    version: "1"
+    aliases:
+      - 高考数学
+      - gaokao mathematics
+    profile:
+      id: gaokao-mathematics
+      display_name: 高考数学
+      version: "1"
+      supported_question_types:
+        - multiple_choice
+        - multiple_select
+        - fill_blank
+        - constructed_response
+        - calculation
+        - proof
+      reviewers:
+        - mathematical
+        - subject
+        - solvability
+        - rubric
+        - pedagogical
+        - structure
+      tools:
+        - sympy
+        - numerical_sampler
+      latex_template: generic-v1
+      difficulty_dimensions:
+        - conceptual
+        - reasoning
+        - calculation
+        - overall
+      conventions:
+        - 使用普通高中数学课程范围内的定义、记号和证明语言
+        - 题目条件、定义域和取值范围必须完整给出
+      source_summary: 内置高考数学结构与命题规则能力包
+    blueprint:
+      id: gaokao-mathematics-150
+      version: "1"
+      subject_profile: gaokao-mathematics
+      title: 普通高等学校招生全国统一考试数学模拟卷
+      target_level: 高中毕业年级
+      duration_minutes: 120
+      total_score: 150
+      language: zh-CN
+      sections:
+        - id: single-choice
+          title: 单项选择题
+          question_type: multiple_choice
+          count: 8
+          score_each: 5
+          topic_tags: [集合与逻辑, 函数与导数, 解析几何, 概率统计]
+        - id: multiple-select
+          title: 多项选择题
+          question_type: multiple_select
+          count: 3
+          score_each: 6
+          topic_tags: [数列, 立体几何, 三角函数]
+        - id: fill-blank
+          title: 填空题
+          question_type: fill_blank
+          count: 3
+          score_each: 5
+          topic_tags: [复数, 平面向量, 计数原理]
+        - id: constructed-response
+          title: 解答题
+          question_type: constructed_response
+          count: 5
+          question_scores: [13, 15, 15, 17, 17]
+          topic_tags: [三角函数与解三角形, 数列, 概率统计, 立体几何, 解析几何, 函数与导数]
+      coverage:
+        - topic_tag: 代数与函数
+          target_score: 55
+        - topic_tag: 几何与向量
+          target_score: 45
+        - topic_tag: 概率与统计
+          target_score: 25
+        - topic_tag: 综合应用
+          target_score: 25
+      difficulty_distribution:
+        easy: 0.3
+        medium: 0.5
+        hard: 0.2
+      constraints:
+        - 所有题目必须给出唯一可判定的作答要求
+        - 解答题必须提供过程分评分点
+        - 不直接改写任何既有真题
+        - 同一知识技巧不得在整卷中重复考查
+    prompt_context:
+      planning:
+        - 保持 8 道单选、3 道多选、3 道填空、5 道解答题的锁定结构
+        - 单选题只有一个正确选项，多选题必须明确存在一个或多个正确选项
+        - 整卷知识覆盖、难度和预计作答时间必须形成梯度，避免相邻题重复同一技巧
+      writing:
+        - 使用规范简体中文，数学符号和条件必须完整且无歧义
+        - 选择题干扰项应对应可解释的典型错误，不能依靠含糊措辞制造差异
+        - 解答题各分问应形成递进关系，但后问不能因前问失误而完全无法作答
+      reviewing:
+        - 复核单选与多选的正确选项数量、题干充分性和答案唯一性
+        - 复核解答题推导、边界情况、等价解法和过程分是否闭合
+        - 复核整卷风格符合高中毕业年级数学考试，不引入超范围术语
+    validators:
+      - gaokao_mathematics_blueprint

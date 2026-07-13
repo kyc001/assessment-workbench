@@ -2,12 +2,17 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
 import httpx
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from assessment_workbench.capabilities import (
+    CapabilityCatalog,
+    SubjectCapability,
+    load_default_capability_catalog,
+)
 from assessment_workbench.compilers import LatexCompiler
 from assessment_workbench.domain import (
     ArbitrationAction,
@@ -29,9 +34,7 @@ from assessment_workbench.domain import (
     QuestionPlanDraft,
     QuestionPlanSetDraft,
     QuestionSlot,
-    QuestionType,
     QuestionVersion,
-    ReviewFinding,
     ReviewReport,
     RubricDraft,
     RubricVersion,
@@ -45,12 +48,11 @@ from assessment_workbench.domain import (
 )
 from assessment_workbench.latex_service import ExamLatexService
 from assessment_workbench.ports import StructuredModel
+from assessment_workbench.prompting import PromptBundle
 from assessment_workbench.storage import ArtifactStore, RunStore
 from assessment_workbench.workflow import Step, WorkflowEngine
 
-SUPPORTED_REVIEWERS = frozenset(
-    {"mathematical", "subject", "solvability", "rubric", "pedagogical", "structure"}
-)
+ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,7 @@ class ExamAgentWorkflow:
         max_draft_validation_attempts: int = 3,
         max_parallel_questions: int = 1,
         compiler: LatexCompiler | None = None,
+        capability_catalog: CapabilityCatalog | None = None,
     ) -> None:
         if max_question_attempts < 1:
             raise ValueError("max_question_attempts must be at least 1")
@@ -95,6 +98,26 @@ class ExamAgentWorkflow:
         self.max_draft_validation_attempts = max_draft_validation_attempts
         self.max_parallel_questions = max_parallel_questions
         self.compiler = compiler
+        self.capabilities = capability_catalog or load_default_capability_catalog()
+        self.prompts = self.capabilities.prompts
+
+    async def _complete(
+        self,
+        model: StructuredModel,
+        *,
+        prompt: PromptBundle,
+        user_prompt: str,
+        response_model: type[ResponseT],
+        run_id: UUID,
+    ) -> ResponseT:
+        return await model.complete(
+            role=prompt.role,
+            system_prompt=prompt.system_prompt,
+            user_prompt=user_prompt,
+            response_model=response_model,
+            prompt_version=prompt.version,
+            run_id=str(run_id),
+        )
 
     async def execute(
         self,
@@ -109,6 +132,14 @@ class ExamAgentWorkflow:
         require_exam_approval: bool = False,
         on_run_created: Callable[[WorkflowRun], None] | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
+        capability: SubjectCapability | None = None
+        if subject_profile is None and blueprint is None:
+            capability = self.capabilities.subjects.resolve(subject)
+            if capability is not None:
+                subject_profile = capability.profile
+                blueprint = capability.blueprint
+                if blueprint is None:
+                    raise ValueError(f"subject capability has no locked blueprint: {capability.id}")
         request = ExamGenerationRequest(
             subject=subject,
             target_level=target_level,
@@ -116,6 +147,9 @@ class ExamAgentWorkflow:
             source_context=source_context,
             subject_profile=subject_profile,
             blueprint=blueprint,
+            capability_id=capability.id if capability is not None else None,
+            capability_version=capability.version if capability is not None else None,
+            capability_context=capability.prompt_context if capability is not None else {},
             require_blueprint_approval=require_blueprint_approval,
             require_exam_approval=require_exam_approval,
         )
@@ -157,12 +191,32 @@ class ExamAgentWorkflow:
         source_context = request.source_context
         provided_profile = request.subject_profile
         provided_blueprint = request.blueprint
-        planning_mode = (
-            ExamPlanningMode.PRESET if provided_profile is not None else ExamPlanningMode.AGENT
-        )
+        capability: SubjectCapability | None = None
+        if request.capability_id is not None:
+            assert request.capability_version is not None
+            assert provided_profile is not None
+            assert provided_blueprint is not None
+            capability = self.capabilities.require_subject_binding(
+                request.capability_id,
+                request.capability_version,
+                provided_profile,
+                provided_blueprint,
+                request.capability_context,
+            )
+        if capability is not None:
+            planning_mode = ExamPlanningMode.CAPABILITY
+        elif provided_profile is not None:
+            planning_mode = ExamPlanningMode.PRESET
+        else:
+            planning_mode = ExamPlanningMode.AGENT
+        capability_validators = capability.validators if capability is not None else []
         if provided_profile is not None and provided_blueprint is not None:
-            _validate_subject_profile(provided_profile)
-            _validate_blueprint(provided_profile, provided_blueprint)
+            self.capabilities.validate_profile(provided_profile, capability_validators)
+            self.capabilities.validate_blueprint(
+                provided_profile,
+                provided_blueprint,
+                capability_validators,
+            )
             if provided_blueprint.target_level != target_level:
                 raise ValueError(
                     "preset blueprint target_level does not match the requested target_level"
@@ -176,36 +230,50 @@ class ExamAgentWorkflow:
                 created_by_phase="SUBJECT_RESEARCHING",
             )
             if provided_profile is None:
-                candidate = await self.models.strong.complete(
-                    role="subject_researcher",
-                    system_prompt=(
-                        "Research a subject profile for exam generation. Use only the supplied "
-                        "context and requirements. Choose reviewers only from: mathematical, "
-                        "subject, solvability, rubric, pedagogical, structure. Do not invent "
-                        "source citations."
-                    ),
-                    user_prompt=_json_prompt(
-                        subject=subject,
-                        target_level=target_level,
-                        requirements=requirements,
-                        source_context=source_context,
-                    ),
-                    response_model=SubjectProfileCandidate,
-                    prompt_version="subject-research-v1",
-                    run_id=str(state["run_id"]),
-                )
-                profile = SubjectProfile(
-                    id=candidate.subject_id,
-                    display_name=candidate.display_name,
-                    supported_question_types=candidate.supported_question_types,
-                    reviewers=[reviewer.value for reviewer in candidate.reviewers],
-                    tools=candidate.tools,
-                    latex_template="generic-v1",
-                    difficulty_dimensions=candidate.difficulty_dimensions,
-                )
+                prompt = self.prompts.require("subject_researcher")
+                validation_feedback: list[str] = []
+                for validation_attempt in range(self.max_draft_validation_attempts):
+                    candidate = await self._complete(
+                        self.models.strong,
+                        prompt=prompt,
+                        user_prompt=_json_prompt(
+                            subject=subject,
+                            target_level=target_level,
+                            requirements=requirements,
+                            source_context=source_context,
+                            registered_reviewers=self.capabilities.reviewers.names(),
+                            registered_tools=self.capabilities.tools.names(),
+                            revision_feedback=validation_feedback,
+                        ),
+                        response_model=SubjectProfileCandidate,
+                        run_id=state["run_id"],
+                    )
+                    profile = SubjectProfile(
+                        id=candidate.subject_id,
+                        display_name=candidate.display_name,
+                        supported_question_types=candidate.supported_question_types,
+                        reviewers=candidate.reviewers,
+                        tools=candidate.tools,
+                        latex_template="generic-v1",
+                        difficulty_dimensions=candidate.difficulty_dimensions,
+                        conventions=candidate.conventions,
+                        source_summary=candidate.source_summary,
+                    )
+                    try:
+                        self.capabilities.validate_profile(profile)
+                        break
+                    except ValueError as exc:
+                        if validation_attempt == self.max_draft_validation_attempts - 1:
+                            raise
+                        validation_feedback = [
+                            "The previous profile referenced unavailable capabilities. "
+                            f"Choose only registered names. Error: {exc}"
+                        ]
+                else:
+                    raise RuntimeError("subject profile validation loop exited unexpectedly")
             else:
                 profile = provided_profile
-            _validate_subject_profile(profile)
+            self.capabilities.validate_profile(profile, capability_validators)
             artifact = self.artifacts.write_json(
                 state["run_id"],
                 "subject-profile.json",
@@ -224,32 +292,47 @@ class ExamAgentWorkflow:
         async def plan_exam(state: dict[str, Any]) -> dict[str, Any]:
             profile: SubjectProfile = state["profile"]
             if provided_blueprint is None:
-                draft = await self.models.strong.complete(
-                    role="exam_blueprint_planner",
-                    system_prompt=(
-                        "Create a complete exam blueprint. Section scores and coverage scores "
-                        "must each sum exactly to total_score. Use only question types supported "
-                        "by the subject profile. For each section, use score_each for uniform "
-                        "scores or question_scores for per-question scores, never both."
-                    ),
-                    user_prompt=_json_prompt(
-                        subject_profile=profile.model_dump(mode="json"),
-                        target_level=target_level,
-                        requirements=requirements,
-                        source_context=source_context,
-                    ),
-                    response_model=BlueprintDraft,
-                    prompt_version="exam-blueprint-v1",
-                    run_id=str(state["run_id"]),
-                )
-                exam_blueprint = ExamBlueprint(
-                    id=f"{profile.id}-{uuid4().hex[:12]}",
-                    subject_profile=profile.id,
-                    **draft.model_dump(),
-                )
+                prompt = self.prompts.require("exam_blueprint_planner")
+                validation_feedback: list[str] = []
+                for validation_attempt in range(self.max_draft_validation_attempts):
+                    draft = await self._complete(
+                        self.models.strong,
+                        prompt=prompt,
+                        user_prompt=_json_prompt(
+                            subject_profile=profile.model_dump(mode="json"),
+                            target_level=target_level,
+                            requirements=requirements,
+                            source_context=source_context,
+                            capability_context=request.capability_context,
+                            revision_feedback=validation_feedback,
+                        ),
+                        response_model=BlueprintDraft,
+                        run_id=state["run_id"],
+                    )
+                    exam_blueprint = ExamBlueprint(
+                        id=f"{profile.id}-{uuid4().hex[:12]}",
+                        subject_profile=profile.id,
+                        **draft.model_dump(),
+                    )
+                    try:
+                        self.capabilities.validate_blueprint(profile, exam_blueprint)
+                        break
+                    except ValueError as exc:
+                        if validation_attempt == self.max_draft_validation_attempts - 1:
+                            raise
+                        validation_feedback = [
+                            "The previous blueprint failed registered capability validation. "
+                            f"Return a complete corrected blueprint. Error: {exc}"
+                        ]
+                else:
+                    raise RuntimeError("exam blueprint validation loop exited unexpectedly")
             else:
                 exam_blueprint = provided_blueprint
-            _validate_blueprint(profile, exam_blueprint)
+            self.capabilities.validate_blueprint(
+                profile,
+                exam_blueprint,
+                capability_validators,
+            )
             blueprint_artifact = self.artifacts.write_json(
                 state["run_id"],
                 "exam-blueprint.json",
@@ -262,11 +345,13 @@ class ExamAgentWorkflow:
                 subject_profile_version=profile.version,
                 blueprint_id=exam_blueprint.id,
                 blueprint_version=exam_blueprint.version,
+                capability_id=request.capability_id,
+                capability_version=request.capability_version,
             )
             planning_artifact = self.artifacts.write_json(
                 state["run_id"],
                 "exam-planning.json",
-                planning.model_dump(mode="json"),
+                planning.model_dump(mode="json", exclude_none=True),
                 created_by_phase="EXAM_PLANNING",
             )
             return {
@@ -280,7 +365,10 @@ class ExamAgentWorkflow:
             }
 
         async def approve_blueprint(state: dict[str, Any]) -> dict[str, Any]:
-            if not request.require_blueprint_approval or planning_mode is ExamPlanningMode.PRESET:
+            if (
+                not request.require_blueprint_approval
+                or planning_mode is not ExamPlanningMode.AGENT
+            ):
                 return {}
             bindings = state.get("_checkpoint_artifacts", {})
             return {
@@ -297,18 +385,10 @@ class ExamAgentWorkflow:
             slots = _blueprint_slots(exam_blueprint)
             planning_feedback: list[str] = []
             for planning_attempt in range(3):
-                draft = await self.models.strong.complete(
-                    role="question_set_planner",
-                    system_prompt=(
-                        "Plan every question in a complete exam before any question is written. "
-                        "Produce exactly one executable plan for each supplied slot and no other "
-                        "plans. Each plan must define a concrete construction, exact assessed "
-                        "skill, difficulty, expected answer form, solution outline, rubric focus, "
-                        "verification methods, estimated time, and constraints that prevent "
-                        "overlap with the other questions. Do not write the final question or its "
-                        "full solution. Keep all structural fields aligned with the supplied slot "
-                        "list."
-                    ),
+                prompt = self.prompts.require("question_set_planner")
+                draft = await self._complete(
+                    self.models.strong,
+                    prompt=prompt,
                     user_prompt=_json_prompt(
                         subject_profile=profile.model_dump(mode="json"),
                         blueprint=exam_blueprint.model_dump(mode="json"),
@@ -316,10 +396,10 @@ class ExamAgentWorkflow:
                         requirements=requirements,
                         source_context=source_context,
                         revision_feedback=planning_feedback,
+                        capability_context=request.capability_context,
                     ),
                     response_model=QuestionPlanSetDraft,
-                    prompt_version="question-set-planner-v1",
-                    run_id=str(state["run_id"]),
+                    run_id=state["run_id"],
                 )
                 try:
                     question_plans = _materialize_question_plans(exam_blueprint, draft.plans)
@@ -462,6 +542,9 @@ class ExamAgentWorkflow:
                         plan=plan,
                         source_context=source_context,
                         parent_run_id=state["run_id"],
+                        capability_id=request.capability_id,
+                        capability_version=request.capability_version,
+                        capability_context=request.capability_context,
                     )
                     bundle = child_state.get("bundle")
                     bundle_artifact = child_state.get("bundle_artifact")
@@ -715,6 +798,9 @@ class ExamAgentWorkflow:
         plan: QuestionPlan,
         source_context: str = "",
         parent_run_id: UUID | None = None,
+        capability_id: str | None = None,
+        capability_version: str | None = None,
+        capability_context: dict[str, list[str]] | None = None,
         on_run_created: Callable[[WorkflowRun], None] | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
         request = QuestionGenerationRequest(
@@ -723,6 +809,9 @@ class ExamAgentWorkflow:
             plan=plan,
             source_context=source_context,
             parent_run_id=parent_run_id,
+            capability_id=capability_id,
+            capability_version=capability_version,
+            capability_context=capability_context or {},
         )
         return await self._run_question_request(request, on_run_created=on_run_created)
 
@@ -756,6 +845,24 @@ class ExamAgentWorkflow:
         restored_state: dict[str, Any] | None = None,
         on_run_created: Callable[[WorkflowRun], None] | None = None,
     ) -> tuple[WorkflowRun, dict[str, Any]]:
+        capability_validators: list[str] = []
+        if request.capability_id is not None:
+            assert request.capability_version is not None
+            capability = self.capabilities.require_subject_binding(
+                request.capability_id,
+                request.capability_version,
+                request.profile,
+                request.blueprint,
+                request.capability_context,
+            )
+            capability_validators = capability.validators
+        self.capabilities.validate_profile(request.profile, capability_validators)
+        self.capabilities.validate_blueprint(
+            request.profile,
+            request.blueprint,
+            capability_validators,
+        )
+
         async def generate_child(state: dict[str, Any]) -> dict[str, Any]:
             request_artifact = self.artifacts.write_json(
                 state["run_id"],
@@ -777,6 +884,8 @@ class ExamAgentWorkflow:
                         blueprint=request.blueprint,
                         plan=request.plan,
                         source_context=request.source_context,
+                        capability_context=request.capability_context,
+                        capability_validators=capability_validators,
                     )
                     break
                 except httpx.HTTPError:
@@ -848,6 +957,8 @@ class ExamAgentWorkflow:
         blueprint: ExamBlueprint,
         plan: QuestionPlan,
         source_context: str,
+        capability_context: dict[str, list[str]],
+        capability_validators: list[str],
     ) -> QuestionGenerationOutcome:
         question_id = uuid4()
         solution_id = uuid4()
@@ -867,40 +978,21 @@ class ExamAgentWorkflow:
             rewrite_rubric = rewrite_solution or retry_target is ArbitrationAction.RETRY_RUBRIC
             if rewrite_question:
                 previous_question = question
+                prompt = self.prompts.require("question_writer")
                 for validation_attempt in range(self.max_draft_validation_attempts):
-                    question_draft = await self.models.standard.complete(
-                        role="question_writer",
-                        system_prompt=(
-                            "Write one original, self-contained, solvable exam question by "
-                            "executing the supplied question plan exactly. Do not provide its "
-                            "answer. Return the statement and each option as ordered content "
-                            "blocks: text for prose, inline_math for short formulas, and "
-                            "display_math for standalone formulas. Do not place LaTeX inside text "
-                            "blocks. Math block content must be a bare expression without dollar "
-                            "signs, \\( ... \\), or \\[ ... \\] delimiters, and must use ASCII "
-                            "punctuation. Geometry notation such as angle names, perpendicular or "
-                            "parallel relations, coordinates, equations, and degree measures must "
-                            "be complete inline_math blocks; never place Unicode ∠, ⊥, or ∥ in "
-                            "text blocks. Do not emit Markdown tables in text blocks; express "
-                            "small data tables as clear prose. Multiple-choice questions require "
-                            "at least four options; do not prefix option content with A, B, C, or "
-                            "D because the renderer adds labels. "
-                            "other types require none. For a constructed-response question, "
-                            "statement contains only the shared stem and every requested "
-                            "subproblem must appear in parts with an explicit score; part scores "
-                            "must sum exactly to the question score. answer_format describes only "
-                            "the response format and must never contain hidden subproblems."
-                        ),
+                    question_draft = await self._complete(
+                        self.models.standard,
+                        prompt=prompt,
                         user_prompt=_json_prompt(
                             profile=profile.model_dump(mode="json"),
                             blueprint_id=blueprint.id,
                             question_plan=plan.model_dump(mode="json"),
                             source_context=source_context,
                             revision_feedback=feedback["writer"],
+                            capability_context=capability_context,
                         ),
                         response_model=QuestionDraft,
-                        prompt_version="question-writer-v1",
-                        run_id=str(run_id),
+                        run_id=run_id,
                     )
                     try:
                         question = QuestionVersion(
@@ -913,9 +1005,9 @@ class ExamAgentWorkflow:
                             question_type=plan.question_type,
                             score=plan.score,
                             metadata=GenerationMetadata(
-                                role="question_writer",
+                                role=prompt.role,
                                 model="routed",
-                                prompt_version="question-writer-v1",
+                                prompt_version=prompt.version,
                                 plan_id=plan.id,
                             ),
                             **question_draft.model_dump(),
@@ -928,30 +1020,20 @@ class ExamAgentWorkflow:
             assert question is not None
             if rewrite_solution:
                 previous_solution = solution
+                prompt = self.prompts.require("independent_solver")
                 for validation_attempt in range(self.max_draft_validation_attempts):
-                    solution_draft = await self.models.strong.complete(
-                        role="independent_solver",
-                        system_prompt=(
-                            "Solve the supplied question independently. Check every step and do "
-                            "not assume an intended answer. Return a rigorous solution. Return "
-                            "final_answer as ordered text, inline_math, or display_math content "
-                            "blocks; do not place LaTeX inside text blocks. Math block content is "
-                            "a "
-                            "bare expression without dollar signs or math delimiters and uses "
-                            "ASCII punctuation. Each step description "
-                            "and conclusion also uses content blocks, while expression contains "
-                            "only pure mathematical LaTeX. Keep final_answer concise and do not "
-                            "repeat the full derivation already present in steps."
-                        ),
+                    solution_draft = await self._complete(
+                        self.models.strong,
+                        prompt=prompt,
                         user_prompt=_json_prompt(
                             question=question.model_dump(mode="json"),
                             question_plan=plan.model_dump(mode="json"),
                             source_context=source_context,
                             revision_feedback=feedback["solver"],
+                            capability_context=capability_context,
                         ),
                         response_model=SolutionDraft,
-                        prompt_version="independent-solver-v1",
-                        run_id=str(run_id),
+                        run_id=run_id,
                     )
                     try:
                         solution = SolutionVersion(
@@ -960,9 +1042,9 @@ class ExamAgentWorkflow:
                             version=(previous_solution.version + 1) if previous_solution else 1,
                             parent_version_id=(previous_solution.id if previous_solution else None),
                             metadata=GenerationMetadata(
-                                role="independent_solver",
+                                role=prompt.role,
                                 model="routed",
-                                prompt_version="independent-solver-v1",
+                                prompt_version=prompt.version,
                                 plan_id=plan.id,
                             ),
                             **solution_draft.model_dump(),
@@ -975,28 +1057,21 @@ class ExamAgentWorkflow:
             assert solution is not None
             if rewrite_rubric:
                 previous_rubric = rubric
+                prompt = self.prompts.require("rubric_builder")
                 for validation_attempt in range(self.max_draft_validation_attempts):
-                    rubric_draft = await self.models.standard.complete(
-                        role="rubric_builder",
-                        system_prompt=(
-                            "Build a non-overlapping analytic rubric from the question and "
-                            "independent solution. Rubric item scores must sum exactly to the "
-                            "question score. Return each rubric description as ordered text, "
-                            "inline_math, or display_math content blocks, with no LaTeX embedded "
-                            "in text blocks. Math block content is a bare expression without "
-                            "dollar "
-                            "signs or math delimiters and uses ASCII punctuation."
-                        ),
+                    rubric_draft = await self._complete(
+                        self.models.standard,
+                        prompt=prompt,
                         user_prompt=_json_prompt(
                             question=question.model_dump(mode="json"),
                             solution=solution.model_dump(mode="json"),
                             question_plan=plan.model_dump(mode="json"),
                             score=plan.score,
                             revision_feedback=feedback["rubric"],
+                            capability_context=capability_context,
                         ),
                         response_model=RubricDraft,
-                        prompt_version="rubric-builder-v1",
-                        run_id=str(run_id),
+                        run_id=run_id,
                     )
                     try:
                         rubric = RubricVersion(
@@ -1007,9 +1082,9 @@ class ExamAgentWorkflow:
                             parent_version_id=(previous_rubric.id if previous_rubric else None),
                             max_score=plan.score,
                             metadata=GenerationMetadata(
-                                role="rubric_builder",
+                                role=prompt.role,
                                 model="routed",
-                                prompt_version="rubric-builder-v1",
+                                prompt_version=prompt.version,
                                 plan_id=plan.id,
                             ),
                             **rubric_draft.model_dump(),
@@ -1021,14 +1096,27 @@ class ExamAgentWorkflow:
                         feedback["rubric"] = [_domain_validation_feedback("rubric", exc)]
             assert rubric is not None
             bundle = ExamQuestionBundle(question=question, solution=solution, rubric=rubric)
-            reports = await self._review(run_id, profile, plan, bundle)
+            self.capabilities.validate_bundle(profile, bundle, capability_validators)
+            reports = await self._review(
+                run_id,
+                profile,
+                plan,
+                bundle,
+                capability_context,
+            )
             self.artifacts.write_json(
                 run_id,
                 f"questions/{plan.number:02d}/reviews-pre-arbitration.json",
                 [report.model_dump(mode="json") for report in reports],
                 created_by_phase=f"QUESTION_ATTEMPT_{attempt}",
             )
-            decision = await self._arbitrate(run_id, plan, bundle, reports)
+            decision = await self._arbitrate(
+                run_id,
+                plan,
+                bundle,
+                reports,
+                capability_context,
+            )
             self._persist_attempt(run_id, plan.number, attempt, bundle, reports, decision)
             if decision.action in {ArbitrationAction.PASS, ArbitrationAction.PASS_WITH_WARNINGS}:
                 return QuestionGenerationOutcome(
@@ -1065,29 +1153,26 @@ class ExamAgentWorkflow:
         profile: SubjectProfile,
         plan: QuestionPlan,
         bundle: ExamQuestionBundle,
+        capability_context: dict[str, list[str]],
     ) -> list[ReviewReport]:
         async def review(name: str) -> ReviewReport:
-            if name == "structure":
-                return _structure_review(bundle)
-            return await self.models.standard.complete(
-                role=f"{name}_reviewer",
-                system_prompt=(
-                    f"Act as the {name} reviewer. Independently inspect the question, "
-                    "solution, rubric, and adherence to the supplied question plan. Mark passed "
-                    "false for any error or fatal finding. Use info or warning for style, "
-                    "difficulty calibration, distractor quality, or non-blocking plan alignment "
-                    "when the bundle remains mathematically valid and scorable. Use error only "
-                    "for an objective defect that prevents reliable use, and fatal only for a "
-                    "wrong or missing answer, an invalid question, or a broken scoring contract."
-                ),
+            definition = self.capabilities.reviewers.require(name)
+            if definition.handler is not None:
+                return definition.handler(bundle)
+            assert definition.prompt_key is not None
+            prompt = self.prompts.require(definition.prompt_key)
+            report = await self._complete(
+                self.models.standard,
+                prompt=prompt,
                 user_prompt=_json_prompt(
                     question_plan=plan.model_dump(mode="json"),
                     bundle=bundle.model_dump(mode="json"),
+                    capability_context=capability_context,
                 ),
                 response_model=ReviewReport,
-                prompt_version="question-review-v1",
-                run_id=str(run_id),
+                run_id=run_id,
             )
+            return report.model_copy(update={"reviewer": name})
 
         return list(await asyncio.gather(*(review(name) for name in profile.reviewers)))
 
@@ -1097,24 +1182,20 @@ class ExamAgentWorkflow:
         plan: QuestionPlan,
         bundle: ExamQuestionBundle,
         reports: list[ReviewReport],
+        capability_context: dict[str, list[str]],
     ) -> ArbitrationDecision:
-        decision = await self.models.strong.complete(
-            role="question_arbiter",
-            system_prompt=(
-                "Arbitrate independent review reports. Retry the earliest invalid dependency: "
-                "a question problem invalidates solution and rubric; a solution problem "
-                "invalidates rubric. Never pass a fatal finding. You may reject an error finding "
-                "as a reviewer severity mistake only when the bundle is objectively correct, "
-                "internally consistent, usable, and scorable; explain that judgment explicitly."
-            ),
+        prompt = self.prompts.require("question_arbiter")
+        decision = await self._complete(
+            self.models.strong,
+            prompt=prompt,
             user_prompt=_json_prompt(
                 question_plan=plan.model_dump(mode="json"),
                 bundle=bundle.model_dump(mode="json"),
                 reports=[report.model_dump(mode="json") for report in reports],
+                capability_context=capability_context,
             ),
             response_model=ArbitrationDecision,
-            prompt_version="question-arbiter-v1",
-            run_id=str(run_id),
+            run_id=run_id,
         )
         fatal_findings = [
             finding
@@ -1185,12 +1266,6 @@ class ExamAgentWorkflow:
             )
 
 
-def _validate_subject_profile(profile: SubjectProfile) -> None:
-    unknown = set(profile.reviewers) - SUPPORTED_REVIEWERS
-    if unknown:
-        raise ValueError(f"subject profile proposed unknown reviewers: {sorted(unknown)}")
-
-
 def _blueprint_slots(blueprint: ExamBlueprint) -> list[QuestionSlot]:
     slots: list[QuestionSlot] = []
     number = 1
@@ -1246,17 +1321,6 @@ def _materialize_question_plans(
     return plans
 
 
-def _validate_blueprint(profile: SubjectProfile, blueprint: ExamBlueprint) -> None:
-    if blueprint.subject_profile != profile.id:
-        raise ValueError("blueprint subject_profile does not match the subject profile id")
-    unsupported = {section.question_type for section in blueprint.sections} - set(
-        profile.supported_question_types
-    )
-    if unsupported:
-        names = sorted(item.value for item in unsupported)
-        raise ValueError(f"blueprint uses unsupported question types: {names}")
-
-
 def _domain_validation_feedback(stage: str, error: ValidationError) -> str:
     details = json.dumps(error.errors(include_url=False), ensure_ascii=False, default=str)
     return (
@@ -1267,34 +1331,3 @@ def _domain_validation_feedback(stage: str, error: ValidationError) -> str:
 
 def _json_prompt(**payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-
-
-def _structure_review(bundle: ExamQuestionBundle) -> ReviewReport:
-    findings: list[ReviewFinding] = []
-    if (
-        bundle.question.question_type is QuestionType.MULTIPLE_CHOICE
-        and len(bundle.question.options) < 4
-    ):
-        findings.append(
-            ReviewFinding(
-                code="choice_options",
-                severity=FindingSeverity.ERROR,
-                target=FindingTarget.QUESTION,
-                message="Multiple-choice question has fewer than four options.",
-            )
-        )
-    if sum(item.score for item in bundle.rubric.items) != bundle.question.score:
-        findings.append(
-            ReviewFinding(
-                code="rubric_score_total",
-                severity=FindingSeverity.FATAL,
-                target=FindingTarget.RUBRIC,
-                message="Rubric scores do not sum to the question score.",
-            )
-        )
-    return ReviewReport(
-        reviewer="structure",
-        passed=not findings,
-        findings=findings,
-        summary="Deterministic domain and scoring checks.",
-    )

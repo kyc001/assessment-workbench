@@ -48,6 +48,43 @@ class FixtureModel:
         return self.responses[role][index]
 
 
+class StopAtQuestionPlanningModel:
+    def __init__(self) -> None:
+        self.roles: list[str] = []
+
+    async def complete(self, **kwargs: Any) -> BaseModel:
+        role = str(kwargs["role"])
+        self.roles.append(role)
+        raise RuntimeError("stop after capability planning")
+
+
+async def test_gaokao_request_uses_locked_capability_before_model_planning(
+    tmp_path: Path,
+) -> None:
+    model = StopAtQuestionPlanningModel()
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    workflow = ExamAgentWorkflow(
+        ModelRouter(standard=model, strong=model),  # type: ignore[arg-type]
+        ArtifactStore(workspace),
+        RunStore(workspace),
+    )
+
+    run, state = await workflow.execute(
+        subject="高考数学",
+        target_level="高中毕业年级",
+        requirements="生成一份完整模拟卷",
+        require_blueprint_approval=True,
+    )
+
+    assert run.status is RunStatus.FAILED
+    assert model.roles == ["question_set_planner"]
+    assert state["planning"].mode is ExamPlanningMode.CAPABILITY
+    assert state["planning"].capability_id == "gaokao-mathematics"
+    assert state["blueprint"].total_score == 150
+    assert sum(section.count for section in state["blueprint"].sections) == 19
+
+
 async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None:
     profile = SubjectProfileCandidate(
         subject_id="mathematics",
@@ -55,6 +92,7 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
         supported_question_types=[QuestionType.CALCULATION],
         reviewers=[ReviewerName.SOLVABILITY, ReviewerName.STRUCTURE],
         difficulty_dimensions=["reasoning"],
+        conventions=["Use standard algebraic notation"],
         source_summary="User requirements",
     )
     blueprint = BlueprintDraft(
@@ -177,6 +215,8 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
 
     assert run.status is RunStatus.SUCCEEDED
     assert state["planning"].mode is ExamPlanningMode.AGENT
+    assert state["profile"].conventions == ["Use standard algebraic notation"]
+    assert state["profile"].source_summary == "User requirements"
     assert strong.calls["subject_researcher"] == 1
     assert strong.calls["exam_blueprint_planner"] == 1
     assert strong.calls["question_set_planner"] == 1
