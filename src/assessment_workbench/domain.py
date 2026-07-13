@@ -1044,7 +1044,7 @@ ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
         {RunStatus.RUNNING, RunStatus.CANCELLING, RunStatus.CANCELLED, RunStatus.FAILED}
     ),
     RunStatus.SUCCEEDED: frozenset(),
-    RunStatus.FAILED: frozenset(),
+    RunStatus.FAILED: frozenset({RunStatus.INTERRUPTED}),
     RunStatus.CANCELLED: frozenset(),
 }
 

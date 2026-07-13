@@ -93,6 +93,21 @@ uv run assessment-workbench exams assemble-edited \
 
 为 edited assembly 增加 `--human-gates` 时，工作流会在全部页面 Artifact 生成后暂停；批准并恢复后，发布 Bundle 才会标记为 `human_verified`。
 
+暂态模型错误在内部重试耗尽后会保留 checkpoint 并把 run 标记为 `interrupted`。继续同一个运行：
+
+```bash
+uv run assessment-workbench runs resume <run-id> --workspace ./workspaces/gaokao
+```
+
+旧版本已经将 429/502/503/504/524 写成 `failed` 时，可在审计化校验后恢复资格，再继续同一个 run：
+
+```bash
+uv run assessment-workbench runs retry-failed <run-id> \
+  --actor <actor> \
+  --reason "transient upstream failure" \
+  --workspace ./workspaces/gaokao
+```
+
 PowerShell 中可将多行命令改成单行执行。
 
 ## MinerU

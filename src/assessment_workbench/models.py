@@ -10,6 +10,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from assessment_workbench.domain import ModelAuditContext, ModelCall, ModelUsage
+from assessment_workbench.errors import RetryableWorkflowError, is_retryable_http_status
 from assessment_workbench.model_contracts import canonical_json_sha256, strict_json_schema
 from assessment_workbench.ports import ModelAuditStore
 
@@ -140,18 +141,14 @@ class OpenAICompatibleModel:
                     if not isinstance(payload, dict):
                         raise ValueError("model response payload is not an object")
                     return payload
-                except (httpx.TimeoutException, httpx.NetworkError):
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
                     if attempt == 2:
-                        raise
+                        raise RetryableWorkflowError(str(exc)) from exc
                 except httpx.HTTPStatusError as exc:
-                    if attempt == 2 or exc.response.status_code not in {
-                        429,
-                        502,
-                        503,
-                        504,
-                        524,
-                    }:
+                    if not is_retryable_http_status(exc.response.status_code):
                         raise
+                    if attempt == 2:
+                        raise RetryableWorkflowError(str(exc)) from exc
                 await asyncio.sleep(0.5 * (2**attempt))
         raise RuntimeError("model request retry loop exited unexpectedly")
 

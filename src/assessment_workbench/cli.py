@@ -177,6 +177,14 @@ def _echo_human_review(run_id: UUID, store: RunStore) -> None:
     typer.echo(f"Continue after decision: assessment-workbench runs resume {run_id}")
 
 
+def _raise_if_interrupted(run_id: UUID, status: RunStatus, error: str | None) -> None:
+    if status is not RunStatus.INTERRUPTED:
+        return
+    typer.echo(f"Retryable interruption: {error or 'workflow interrupted'}", err=True)
+    typer.echo(f"Resume: assessment-workbench runs resume {run_id}", err=True)
+    raise typer.Exit(1)
+
+
 @workspace_app.command("init")
 def initialize_workspace(path: Path) -> None:
     workspace = Workspace(path)
@@ -431,6 +439,7 @@ def resume_run(
     if resumed.status is RunStatus.WAITING_HUMAN:
         _echo_human_review(resumed.id, store)
         return
+    _raise_if_interrupted(resumed.id, resumed.status, resumed.error)
     if resumed.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {resumed.error or 'workflow ended without success'}", err=True)
         raise typer.Exit(1)
@@ -498,6 +507,27 @@ def retry_run(
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     _resolve_human(run_id, HumanDecisionType.RETRY, actor, reason, workspace_path)
+
+
+@runs_app.command("retry-failed")
+def retry_failed_run(
+    run_id: UUID,
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    try:
+        run = RunStore(_workspace(workspace_path)).retry_failed(
+            run_id,
+            actor=actor,
+            reason=reason,
+        )
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Run: {run.id}")
+    typer.echo(f"Status: {run.status}")
+    typer.echo(f"Resume: assessment-workbench runs resume {run.id}")
 
 
 @runs_app.command("abort")
@@ -573,6 +603,7 @@ def generate_exam(
     if run.status is RunStatus.WAITING_HUMAN:
         _echo_human_review(run.id, RunStore(workspace))
         return
+    _raise_if_interrupted(run.id, run.status, run.error)
     if run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {run.error or 'workflow ended without success'}", err=True)
         raise typer.Exit(1)
@@ -710,6 +741,7 @@ def generate_exam_question(
         )
     )
     typer.echo(f"Status: {child_run.status}")
+    _raise_if_interrupted(child_run.id, child_run.status, child_run.error)
     if child_run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {child_run.error or 'question generation failed'}", err=True)
         raise typer.Exit(1)
@@ -815,6 +847,7 @@ def assemble_edited_exam(
     if assembly_run.status is RunStatus.WAITING_HUMAN:
         _echo_human_review(assembly_run.id, RunStore(workspace))
         return
+    _raise_if_interrupted(assembly_run.id, assembly_run.status, assembly_run.error)
     if assembly_run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {assembly_run.error or 'edited assembly failed'}", err=True)
         raise typer.Exit(1)

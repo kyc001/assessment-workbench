@@ -9,7 +9,7 @@ import socket
 import sqlite3
 import tempfile
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from assessment_workbench.domain import (
     ArtifactRef,
@@ -31,6 +31,7 @@ from assessment_workbench.domain import (
     now_utc,
     validate_run_transition,
 )
+from assessment_workbench.errors import is_retryable_failure
 
 
 class Workspace:
@@ -126,6 +127,61 @@ class RunStore:
         run.runner_host = None
         run.runner_pid = None
         self.save(run)
+        return run
+
+    def retry_failed(self, run_id: UUID, *, actor: str, reason: str) -> WorkflowRun:
+        if not actor.strip():
+            raise ValueError("failed run retry requires an actor")
+        if not reason.strip():
+            raise ValueError("failed run retry requires a reason")
+        run = self.get(run_id)
+        if run is None:
+            raise KeyError(f"run not found: {run_id}")
+        if run.status is not RunStatus.FAILED:
+            raise ValueError(f"run is not failed: {run.status}")
+        if self.get_checkpoint(run_id) is None:
+            raise ValueError(f"failed run has no recovery checkpoint: {run_id}")
+        failed_events = [
+            event for event in self.events(run_id) if event.status is PhaseStatus.FAILED
+        ]
+        if not failed_events:
+            raise ValueError(f"failed run has no failed phase event: {run_id}")
+        failed = failed_events[-1]
+        if not is_retryable_failure(failed.error_code, failed.error):
+            raise ValueError(f"failed run error is not retryable: {failed.error_code or 'unknown'}")
+        validate_run_transition(run.status, RunStatus.INTERRUPTED)
+        timestamp = now_utc()
+        recovery_event = PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="RUN_RECOVERY",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1 + sum(event.phase == "RUN_RECOVERY" for event in self.events(run.id)),
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "failed_phase": failed.phase,
+                "failed_error_code": failed.error_code or "unknown",
+                "failed_error": failed.error or "",
+            },
+        )
+        run.status = RunStatus.INTERRUPTED
+        run.error = f"retry requested by {actor.strip()}: {reason.strip()}"
+        run.runner_host = None
+        run.runner_pid = None
+        run.updated_at = timestamp
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_phase_event(connection, recovery_event)
+            connection.execute(
+                """UPDATE runs SET status=?, updated_at=?, error=?, runner_host=NULL,
+                runner_pid=NULL WHERE id=?""",
+                (run.status, run.updated_at.isoformat(), run.error, str(run.id)),
+            )
+            connection.commit()
         return run
 
     def recover_orphaned(self, *, host: str | None = None) -> list[WorkflowRun]:

@@ -12,6 +12,7 @@ from assessment_workbench.domain import (
     WorkflowRun,
     now_utc,
 )
+from assessment_workbench.errors import RetryableWorkflowError
 from assessment_workbench.storage import RunStore
 
 Step = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -227,6 +228,10 @@ class WorkflowEngine:
                 step_index = next_step_index
         except (KeyboardInterrupt, SystemExit):
             self.store.transition(run, RunStatus.INTERRUPTED)
+            self.store.release(run)
+            return run, state
+        except RetryableWorkflowError as exc:
+            self.store.transition(run, RunStatus.INTERRUPTED, error=str(exc))
             self.store.release(run)
             return run, state
         except Exception as exc:
