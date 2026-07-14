@@ -2,7 +2,7 @@
 
 面向数理课程的可审计试题生成、试卷数字化与辅助阅卷工作流。
 
-当前版本是轻量 CLI 骨架，已经打通：
+当前版本同时提供 CLI 和本地单用户 Web GUI，已经打通：
 
 ```text
 课程材料 -> 结构化文档 -> 课程知识点/关系 -> 检索 -> 题目规格 -> 持久运行记录
@@ -29,18 +29,32 @@
 - 从知识点标签生成带来源上下文的 `QuestionSpec`
 - 为 LightRAG、RAG-Anything 等后端预留端口，但默认不安装
 - 工作流阶段和产物可审计；检查点通过 Artifact 引用恢复，并支持人工接受、重试和终止
+- 本地 GUI 可创建整卷、实时查看研究/逐题/文档进度、编辑或重跑单题并预览 PDF
 
 ## 开发
 
 ```bash
 uv sync
 uv run assessment-workbench --help
-uv run pytest
 uv run ruff check .
-uv run mypy src
+uv run mypy
+npm --prefix frontend install
+npm --prefix frontend run typecheck
+npm --prefix frontend run build
 ```
 
+测试按改动风险运行针对性的领域、集成或真实链路验证，不用无关全量测试替代静态检查和产物验收。
+
 ## 快速体验
+
+已有 workspace 可直接启动本地 GUI：
+
+```bash
+uv run assessment-workbench gui --workspace ./workspaces/gaokao
+```
+
+GUI 默认仅绑定 `127.0.0.1`，使用系统浏览器，不包含登录、管理员、角色、Token、权限或多租户模块。
+它和 CLI 共用同一应用服务、工作流内核、SQLite 与 Artifact，不通过子进程调用 CLI。
 
 ```bash
 uv run assessment-workbench workspace init ./workspaces/demo

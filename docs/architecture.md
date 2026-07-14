@@ -12,7 +12,8 @@
 ## 当前垂直切片
 
 ```text
-CLI
+CLI / local React GUI
+  -> shared application services
   -> MaterialIngestionWorkflow
       -> DocumentParser
       -> heading graph extraction
@@ -28,6 +29,25 @@ CLI
       -> three-view document build and release bundle
   -> SQLite RunStore / PhaseEvent
 ```
+
+## 本地图形化工作台
+
+`assessment-workbench gui` 启动 FastAPI/Uvicorn 本地服务并由系统浏览器打开 React/Vite 界面。
+这是单用户运行工作台，不是管理后台；不实现登录、管理员、角色、Token、权限或多租户。
+
+```text
+React GUI
+  -> typed HTTP API + SSE（断线后轮询并重连）
+      -> WorkbenchApplicationService
+          -> ExamAgentWorkflow / EditedExamAssemblyWorkflow
+          -> RunStore / ArtifactStore
+          -> editable question CAS validation
+```
+
+界面从 SQLite、阶段事件、父子运行和实时 manifest 重建状态。成功研究报告、单题 Bundle 和文档视图
+分别即时可见，一个 child 失败不会遮蔽其他成功结果。单题编辑在服务端通过领域模型和计划合同校验，
+整卷重新组装创建独立 child run。PDF 通过已登记 Artifact 的 inline 响应预览和下载，前端不能拼接
+workspace 文件路径。
 
 ## 端口和适配器
 
@@ -218,13 +238,12 @@ WorkflowEngine 通过 `RunStore.commit_phase` 在一个 SQLite 事务内提交 c
 
 它不是最终的语义检索实现，但足以保持 CLI 原型轻量，并为后续向量或 LightRAG 适配器提供基准。
 
-## 下一条垂直切片
+## 后续产品切片
 
 ```text
-轻量本地控制台
-  -> 运行时间线和研究/题目实时 manifest
-  -> Blueprint 与单题结构化编辑
-  -> 单题重跑、局部重审和版本对比
-  -> 内置 PDF 查看与人工页面验收
-  -> 调用现有领域服务和工作流内核，不复制业务逻辑
+现有本地工作台
+  -> Blueprint 结构化编辑与版本差异
+  -> 页面级人工验收操作
+  -> 局部重审和版本对比
+  -> 试卷数字化与辅助阅卷界面
 ```

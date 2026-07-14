@@ -7,14 +7,15 @@ from uuid import UUID, uuid4
 
 import typer
 
-from assessment_workbench.agents import ExamAgentWorkflow, ModelRouter
-from assessment_workbench.compilers import TectonicCompiler
-from assessment_workbench.config import Settings
-from assessment_workbench.document_workflow import (
-    DocumentBatchWorkflow,
-    DocumentBuildWorkflow,
-    latest_document_builds,
+from assessment_workbench.application import (
+    build_edited_exam_workflow,
+    build_exam_workflow,
+    latest_artifact_json,
+    open_workspace,
+    publish_question_bundle,
 )
+from assessment_workbench.config import Settings
+from assessment_workbench.document_workflow import latest_document_builds
 from assessment_workbench.domain import (
     ArtifactRef,
     CalculatorPolicy,
@@ -33,10 +34,8 @@ from assessment_workbench.domain import (
     QuestionType,
     RunStatus,
     SubjectProfile,
-    WorkflowRun,
     now_utc,
 )
-from assessment_workbench.edited_exam_workflow import EditedExamAssemblyWorkflow
 from assessment_workbench.exam_quality import (
     validate_bundle_for_plan,
     validate_question_plan_coverage,
@@ -45,7 +44,6 @@ from assessment_workbench.exam_quality import (
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
 from assessment_workbench.models import OpenAICompatibleModel
 from assessment_workbench.parsers import FixtureParser, MinerUApiParser, MinerUCliParser
-from assessment_workbench.pdf_inspection import PopplerPdfInspector
 from assessment_workbench.planning import QuestionSpecWorkflow
 from assessment_workbench.ports import DocumentParser
 from assessment_workbench.profiles import load_exam_blueprint, load_subject_profile
@@ -76,11 +74,7 @@ app.add_typer(exams_app, name="exams")
 
 
 def _workspace(path: Path | None) -> Workspace:
-    root = path or Settings().workspace
-    workspace = Workspace(root)
-    workspace.require_initialized()
-    RunStore(workspace).recover_orphaned()
-    return workspace
+    return open_workspace(path)
 
 
 def _console_safe(value: object, *, err: bool = False) -> str:
@@ -88,93 +82,6 @@ def _console_safe(value: object, *, err: bool = False) -> str:
     stream = sys.stderr if err else sys.stdout
     encoding = getattr(stream, "encoding", None) or "utf-8"
     return text.encode(encoding, errors="replace").decode(encoding)
-
-
-def _exam_workflow(
-    workspace: Workspace,
-    settings: Settings,
-    *,
-    compile_pdf: bool,
-) -> ExamAgentWorkflow:
-    audit_store = LocalKnowledgeBackend(workspace)
-    standard = OpenAICompatibleModel(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        audit_store=audit_store,
-        timeout=settings.http_timeout,
-        max_concurrency=settings.llm_request_concurrency,
-    )
-    strong = standard
-    if settings.llm_strong_model != settings.llm_model:
-        strong = OpenAICompatibleModel(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            model=settings.llm_strong_model,
-            audit_store=audit_store,
-            timeout=settings.http_timeout,
-            max_concurrency=settings.llm_request_concurrency,
-        )
-    compiler = None
-    inspector = None
-    if compile_pdf:
-        compiler = TectonicCompiler(
-            settings.tectonic_command,
-            timeout_seconds=settings.tectonic_timeout,
-        )
-        inspector = PopplerPdfInspector(
-            pdfinfo_command=settings.pdfinfo_command,
-            pdftotext_command=settings.pdftotext_command,
-            pdftoppm_command=settings.pdftoppm_command,
-            timeout_seconds=settings.pdf_inspection_timeout,
-            raster_dpi=settings.pdf_raster_dpi,
-        )
-    return ExamAgentWorkflow(
-        ModelRouter(standard=standard, strong=strong),
-        ArtifactStore(workspace),
-        RunStore(workspace),
-        max_exam_reviewer_attempts=settings.exam_reviewer_attempts,
-        max_exam_review_rounds=settings.exam_review_rounds,
-        max_parallel_questions=settings.exam_question_concurrency,
-        compiler=compiler,
-        pdf_inspector=inspector,
-    )
-
-
-def _edited_exam_workflow(
-    workspace: Workspace,
-    settings: Settings,
-) -> EditedExamAssemblyWorkflow:
-    artifacts = ArtifactStore(workspace)
-    runs = RunStore(workspace)
-    compiler = TectonicCompiler(
-        settings.tectonic_command,
-        timeout_seconds=settings.tectonic_timeout,
-    )
-    inspector = PopplerPdfInspector(
-        pdfinfo_command=settings.pdfinfo_command,
-        pdftotext_command=settings.pdftotext_command,
-        pdftoppm_command=settings.pdftoppm_command,
-        timeout_seconds=settings.pdf_inspection_timeout,
-        raster_dpi=settings.pdf_raster_dpi,
-    )
-    documents = DocumentBatchWorkflow(
-        DocumentBuildWorkflow(compiler, inspector, artifacts, runs),
-        artifacts,
-        runs,
-    )
-    return EditedExamAssemblyWorkflow(documents, artifacts, runs)
-
-
-def _latest_artifact_json(
-    artifacts: ArtifactStore,
-    run_id: UUID,
-    logical_name: str,
-) -> Any:
-    latest = artifacts.latest(run_id, logical_name)
-    if latest is None:
-        raise KeyError(f"artifact not found for run {run_id}: {logical_name}")
-    return artifacts.read_json(latest.id)
 
 
 def _artifact_display_path(
@@ -186,59 +93,6 @@ def _artifact_display_path(
         return "-"
     artifact = artifacts.get(artifact_id)
     return str(workspace.root / artifact.path) if artifact is not None else "<missing>"
-
-
-def _publish_question_bundle(
-    workspace: Workspace,
-    *,
-    parent_run_id: UUID,
-    plan: QuestionPlan,
-    child_run: WorkflowRun,
-    bundle: ExamQuestionBundle,
-    bundle_artifact: ArtifactRef,
-) -> Path:
-    if bundle.question.number != plan.number:
-        raise ValueError("question bundle number does not match its plan")
-    artifacts = ArtifactStore(workspace)
-    editable_path = artifacts.write_editable_json(
-        parent_run_id,
-        f"questions/{plan.number:02d}.json",
-        bundle.model_dump(mode="json"),
-    )
-    try:
-        records = _latest_artifact_json(artifacts, parent_run_id, "question-runs.json")
-    except KeyError:
-        records = []
-    if not isinstance(records, list):
-        raise RuntimeError("question-runs artifact is not a list")
-    records = [
-        record
-        for record in records
-        if not isinstance(record, dict) or record.get("question_number") != plan.number
-    ]
-    records.append(
-        {
-            "question_number": plan.number,
-            "plan_id": plan.id,
-            "run_id": str(child_run.id),
-            "status": child_run.status,
-            "error": child_run.error,
-            "bundle_artifact_id": str(bundle_artifact.id),
-            "bundle_path": str(bundle_artifact.path),
-            "editable_path": str(editable_path),
-        }
-    )
-    records.sort(
-        key=lambda record: int(record.get("question_number", 0)) if isinstance(record, dict) else 0
-    )
-    artifacts.write_editable_json(parent_run_id, "question-runs.json", records)
-    artifacts.write_json(
-        parent_run_id,
-        "question-runs.json",
-        records,
-        created_by_phase="QUESTION_REGENERATING",
-    )
-    return editable_path
 
 
 def _echo_human_review(run_id: UUID, store: RunStore) -> None:
@@ -257,6 +111,40 @@ def _raise_if_interrupted(run_id: UUID, status: RunStatus, error: str | None) ->
     typer.echo(f"Retryable interruption: {error or 'workflow interrupted'}", err=True)
     typer.echo(f"Resume: assessment-workbench runs resume {run_id}", err=True)
     raise typer.Exit(1)
+
+
+@app.command("gui")
+def launch_gui(
+    host: Annotated[
+        str, typer.Option(help="Host interface for the local GUI service")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8765,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Open the GUI in the default browser"),
+    ] = True,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from assessment_workbench.web_api import create_gui_app
+
+    workspace = _workspace(workspace_path)
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        typer.echo(
+            "Warning: GUI is running without authentication on a non-loopback interface.",
+            err=True,
+        )
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{browser_host}:{port}"
+    if open_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    typer.echo(f"Assessment Workbench GUI: {url}")
+    typer.echo(f"Workspace: {workspace.root}")
+    uvicorn.run(create_gui_app(workspace, Settings()), host=host, port=port, log_level="info")
 
 
 @workspace_app.command("init")
@@ -492,7 +380,7 @@ def resume_run(
         _echo_human_review(run_id, store)
         raise typer.Exit(1)
 
-    workflow = _exam_workflow(workspace, Settings(), compile_pdf=True)
+    workflow = build_exam_workflow(workspace, Settings(), compile_pdf=True)
     try:
         if run.workflow == "exam_agent_generation":
             resumed, state = asyncio.run(workflow.resume(run_id))
@@ -500,7 +388,7 @@ def resume_run(
             resumed, state = asyncio.run(workflow.resume_question_run(run_id))
         elif run.workflow == "exam_edited_assembly":
             resumed, state = asyncio.run(
-                _edited_exam_workflow(workspace, Settings()).resume(run_id)
+                build_edited_exam_workflow(workspace, Settings()).resume(run_id)
             )
         else:
             raise ValueError(f"workflow does not have a registered resume handler: {run.workflow}")
@@ -519,7 +407,7 @@ def resume_run(
         raise typer.Exit(1)
     if resumed.workflow == "exam_question_generation":
         request = QuestionGenerationRequest.model_validate(
-            _latest_artifact_json(ArtifactStore(workspace), resumed.id, "question-request.json")
+            latest_artifact_json(ArtifactStore(workspace), resumed.id, "question-request.json")
         )
         bundle = state.get("bundle")
         bundle_artifact = state.get("bundle_artifact")
@@ -528,7 +416,7 @@ def resume_run(
             and isinstance(bundle, ExamQuestionBundle)
             and isinstance(bundle_artifact, ArtifactRef)
         ):
-            editable_path = _publish_question_bundle(
+            editable_path = publish_question_bundle(
                 workspace,
                 parent_run_id=request.parent_run_id,
                 plan=request.plan,
@@ -679,7 +567,7 @@ def generate_exam(
 
     workspace = _workspace(workspace_path)
     settings = Settings()
-    workflow = _exam_workflow(workspace, settings, compile_pdf=True)
+    workflow = build_exam_workflow(workspace, settings, compile_pdf=True)
     run, state = asyncio.run(
         workflow.execute(
             subject=subject,
@@ -722,7 +610,7 @@ def show_exam_question_status(
         if live_path.is_file():
             records = json.loads(live_path.read_text(encoding="utf-8"))
         else:
-            records = _latest_artifact_json(
+            records = latest_artifact_json(
                 ArtifactStore(workspace), parent_run_id, "question-runs.json"
             )
     except (KeyError, OSError, ValueError) as exc:
@@ -770,7 +658,7 @@ def show_exam_research_status(
         payload = (
             json.loads(live_path.read_text(encoding="utf-8"))
             if live_path.is_file()
-            else _latest_artifact_json(artifacts, parent_run_id, "subject-research-runs.json")
+            else latest_artifact_json(artifacts, parent_run_id, "subject-research-runs.json")
         )
         records = parse_subject_research_records(payload)
     except (KeyError, OSError, ValueError) as exc:
@@ -801,7 +689,7 @@ def show_exam_document_status(
         if live_path.is_file():
             payload = json.loads(live_path.read_text(encoding="utf-8"))
         else:
-            payload = _latest_artifact_json(artifacts, parent_run_id, "document-build-runs.json")
+            payload = latest_artifact_json(artifacts, parent_run_id, "document-build-runs.json")
         if not isinstance(payload, list):
             raise ValueError("document build manifest is not a list")
         records = [DocumentBuildRunRecord.model_validate(item) for item in payload]
@@ -848,14 +736,14 @@ def generate_exam_question(
     artifacts = ArtifactStore(workspace)
     try:
         profile = SubjectProfile.model_validate(
-            _latest_artifact_json(artifacts, parent_run_id, "subject-profile.json")
+            latest_artifact_json(artifacts, parent_run_id, "subject-profile.json")
         )
         blueprint = ExamBlueprint.model_validate(
-            _latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
+            latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
         )
         plans = [
             QuestionPlan.model_validate(item)
-            for item in _latest_artifact_json(artifacts, parent_run_id, "question-plans.json")
+            for item in latest_artifact_json(artifacts, parent_run_id, "question-plans.json")
         ]
     except (KeyError, ValueError) as exc:
         raise typer.BadParameter(f"parent run is missing valid planning artifacts: {exc}") from exc
@@ -863,7 +751,7 @@ def generate_exam_question(
     if plan is None:
         raise typer.BadParameter(f"question number is not present in the plan: {number}")
 
-    workflow = _exam_workflow(workspace, Settings(), compile_pdf=False)
+    workflow = build_exam_workflow(workspace, Settings(), compile_pdf=False)
     child_run, state = asyncio.run(
         workflow.generate_question_run(
             profile=profile,
@@ -884,7 +772,7 @@ def generate_exam_question(
     bundle_artifact = state.get("bundle_artifact")
     if not isinstance(bundle, ExamQuestionBundle) or not isinstance(bundle_artifact, ArtifactRef):
         raise RuntimeError("question child run completed without a bundle artifact")
-    editable_path = _publish_question_bundle(
+    editable_path = publish_question_bundle(
         workspace,
         parent_run_id=parent_run_id,
         plan=plan,
@@ -1403,17 +1291,17 @@ def publish_exam_question_run(
     artifacts = ArtifactStore(workspace)
     try:
         request = QuestionGenerationRequest.model_validate(
-            _latest_artifact_json(artifacts, child_run.id, "question-request.json")
+            latest_artifact_json(artifacts, child_run.id, "question-request.json")
         )
         bundle = ExamQuestionBundle.model_validate(
-            _latest_artifact_json(artifacts, child_run.id, "question-bundle.json")
+            latest_artifact_json(artifacts, child_run.id, "question-bundle.json")
         )
         bundle_artifact = artifacts.latest(child_run.id, "question-bundle.json")
     except (KeyError, ValueError) as exc:
         raise typer.BadParameter(f"question child artifacts are invalid: {exc}") from exc
     if request.parent_run_id is None or bundle_artifact is None:
         raise typer.BadParameter("question child run has no parent or bundle artifact")
-    editable_path = _publish_question_bundle(
+    editable_path = publish_question_bundle(
         workspace,
         parent_run_id=request.parent_run_id,
         plan=request.plan,
@@ -1621,7 +1509,7 @@ def assemble_edited_exam(
     artifacts = ArtifactStore(workspace)
     try:
         blueprint = ExamBlueprint.model_validate(
-            _latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
+            latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
         )
     except (KeyError, ValueError) as exc:
         raise typer.BadParameter(f"parent run has no valid blueprint: {exc}") from exc
@@ -1651,7 +1539,7 @@ def assemble_edited_exam(
         raise typer.BadParameter(f"editable question validation failed: {exc}") from exc
 
     assembly_run, state = asyncio.run(
-        _edited_exam_workflow(workspace, Settings()).execute(
+        build_edited_exam_workflow(workspace, Settings()).execute(
             exam,
             source_parent_run_id=parent_run_id,
             require_document_approval=human_gates,

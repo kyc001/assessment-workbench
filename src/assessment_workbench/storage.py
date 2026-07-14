@@ -435,6 +435,19 @@ class RunStore:
             row = connection.execute("SELECT * FROM runs WHERE id=?", (str(run_id),)).fetchone()
         return _run_from_row(row) if row else None
 
+    def get_many(self, run_ids: list[UUID]) -> list[WorkflowRun]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" for _ in run_ids)
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM runs WHERE id IN ({placeholders})",  # noqa: S608
+                tuple(str(run_id) for run_id in run_ids),
+            ).fetchall()
+        parsed = [_run_from_row(row) for row in rows]
+        by_id = {run.id: run for run in parsed}
+        return [by_id[run_id] for run_id in run_ids if run_id in by_id]
+
     def events(self, run_id: UUID) -> list[PhaseEvent]:
         with self.workspace.connect() as connection:
             rows = connection.execute(
@@ -451,6 +464,34 @@ class RunStore:
                 (str(parent_run_id),),
             ).fetchall()
         return [UUID(str(row["run_id"])) for row in rows]
+
+    def parent_run_id(self, run_id: UUID) -> UUID | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                """SELECT parent_run_id FROM phase_events
+                WHERE run_id=? AND parent_run_id IS NOT NULL
+                ORDER BY started_at, rowid LIMIT 1""",
+                (str(run_id),),
+            ).fetchone()
+        return UUID(str(row["parent_run_id"])) if row is not None else None
+
+    def run_relationships(self) -> tuple[dict[UUID, UUID], dict[UUID, int]]:
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                """SELECT run_id, parent_run_id FROM phase_events
+                WHERE parent_run_id IS NOT NULL
+                GROUP BY run_id, parent_run_id"""
+            ).fetchall()
+        parent_by_child: dict[UUID, UUID] = {}
+        children_by_parent: dict[UUID, set[UUID]] = {}
+        for row in rows:
+            child_id = UUID(str(row["run_id"]))
+            parent_id = UUID(str(row["parent_run_id"]))
+            parent_by_child.setdefault(child_id, parent_id)
+            children_by_parent.setdefault(parent_id, set()).add(child_id)
+        return parent_by_child, {
+            parent_id: len(child_ids) for parent_id, child_ids in children_by_parent.items()
+        }
 
     def _run_has_retryable_failure(self, run_id: UUID) -> bool:
         failed_events = [
