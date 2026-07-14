@@ -1104,7 +1104,10 @@ def _windows_pid_exists(pid: int) -> bool:
 
     process_query_limited_information = 0x1000
     still_active = 259
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    win_dll = getattr(ctypes, "WinDLL", None)
+    if win_dll is None:
+        return False
+    kernel32 = win_dll("kernel32", use_last_error=True)
     handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
     if not handle:
         return False
