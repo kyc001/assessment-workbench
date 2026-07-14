@@ -8,6 +8,7 @@ import re
 import socket
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -32,6 +33,9 @@ from assessment_workbench.domain import (
     validate_run_transition,
 )
 from assessment_workbench.errors import is_retryable_failure
+
+_EDITABLE_REPLACE_ATTEMPTS = 7
+_EDITABLE_REPLACE_BASE_DELAY_SECONDS = 0.01
 
 
 class Workspace:
@@ -154,6 +158,9 @@ class RunStore:
         if not retryable and _is_subject_synthesis_validation_recoverable(failed, checkpoint):
             retryable = True
             recovery_kind = "subject_synthesis_validation"
+        if not retryable and _is_editable_projection_replace_recoverable(failed, checkpoint):
+            retryable = True
+            recovery_kind = "editable_projection_replace"
         if not retryable and failed.phase == "QUESTIONS_GENERATING":
             child_runs = [
                 child
@@ -832,7 +839,7 @@ class ArtifactStore:
                 stream.write(serialized)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary_name, destination)
+            _replace_editable_file(Path(temporary_name), destination)
         except Exception:
             if os.path.exists(temporary_name):
                 os.unlink(temporary_name)
@@ -983,11 +990,39 @@ def _is_subject_synthesis_validation_recoverable(
     )
 
 
+def _is_editable_projection_replace_recoverable(
+    failed: PhaseEvent,
+    checkpoint: WorkflowCheckpoint,
+) -> bool:
+    if (
+        checkpoint.workflow != "exam_question_generation"
+        or failed.phase != "REVIEWS_GENERATING"
+        or failed.error_code != "PermissionError"
+    ):
+        return False
+    required_bindings = {"request", "plan", "question_state", "question", "solution", "rubric"}
+    if not required_bindings <= checkpoint.artifact_bindings.keys():
+        return False
+    error = failed.error or ""
+    return ".editable-" in error and "review-runs.json" in error
+
+
 def _versioned_name(logical_name: str, version: int) -> str:
     path = Path(logical_name)
     suffix = "".join(path.suffixes)
     stem = path.name[: -len(suffix)] if suffix else path.name
     return f"{stem}.v{version}{suffix}"
+
+
+def _replace_editable_file(source: Path, destination: Path) -> None:
+    for attempt in range(_EDITABLE_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == _EDITABLE_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_EDITABLE_REPLACE_BASE_DELAY_SECONDS * (2**attempt))
 
 
 def _run_values(

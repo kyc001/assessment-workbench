@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+import assessment_workbench.storage as storage_module
 from assessment_workbench.storage import ArtifactStore, RunStore, Workspace
 
 
@@ -95,3 +96,55 @@ def test_artifact_reconcile_removes_only_recognized_orphans(tmp_path: Path) -> N
     ]
     assert (workspace.root / kept.path).exists()
     assert unknown.exists()
+
+
+def test_editable_publish_retries_transient_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    run = RunStore(workspace).create("editable-retry")
+    store = ArtifactStore(workspace)
+    original_replace = storage_module.os.replace
+    attempts = 0
+
+    def replace_after_contention(source: Path, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, "destination is temporarily busy", str(destination))
+        original_replace(source, destination)
+
+    monkeypatch.setattr(storage_module.os, "replace", replace_after_contention)
+    monkeypatch.setattr(storage_module.time, "sleep", lambda _: None)
+
+    path = store.write_editable_json(run.id, "review-runs.json", [{"status": "running"}])
+
+    assert attempts == 3
+    assert store.read_editable_json(run.id, "review-runs.json") == [{"status": "running"}]
+    assert list((workspace.root / path).parent.glob(".editable-*")) == []
+
+
+def test_editable_publish_cleans_temp_after_permission_retry_exhaustion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    run = RunStore(workspace).create("editable-retry-exhausted")
+    store = ArtifactStore(workspace)
+    attempts = 0
+
+    def always_busy(_: Path, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(5, "destination remains busy", str(destination))
+
+    monkeypatch.setattr(storage_module.os, "replace", always_busy)
+    monkeypatch.setattr(storage_module.time, "sleep", lambda _: None)
+
+    with pytest.raises(PermissionError, match="destination remains busy"):
+        store.write_editable_json(run.id, "review-runs.json", [])
+
+    editable_dir = workspace.root / "editable" / str(run.id)
+    assert attempts == storage_module._EDITABLE_REPLACE_ATTEMPTS
+    assert list(editable_dir.glob(".editable-*")) == []

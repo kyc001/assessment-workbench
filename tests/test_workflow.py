@@ -405,3 +405,43 @@ def test_failed_value_error_run_remains_non_retryable(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="not retryable"):
         store.retry_failed(run.id, actor="test", reason="should remain failed")
+
+
+def test_failed_editable_projection_replace_is_audited_before_retry(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    run = store.create("exam_question_generation")
+    store.transition(run, RunStatus.RUNNING, current_phase="REVIEWS_GENERATING")
+    store.save_checkpoint(
+        WorkflowCheckpoint(
+            run_id=run.id,
+            workflow=run.workflow,
+            next_step_index=4,
+            artifact_bindings={
+                name: uuid4()
+                for name in ("request", "plan", "question_state", "question", "solution", "rubric")
+            },
+        )
+    )
+    store.append_event(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="REVIEWS_GENERATING",
+            status=PhaseStatus.FAILED,
+            occurrence_id=uuid4(),
+            started_at=now_utc(),
+            completed_at=now_utc(),
+            error_code="PermissionError",
+            error="[WinError 5] .editable-busy -> review-runs.json",
+        )
+    )
+    store.transition(run, RunStatus.FAILED, error="editable projection replace failed")
+
+    recovered = store.retry_failed(run.id, actor="test", reason="retry live projection")
+
+    assert recovered.status is RunStatus.INTERRUPTED
+    recovery = store.events(run.id)[-1]
+    assert recovery.phase == "RUN_RECOVERY"
+    assert recovery.error_details["recovery_kind"] == "editable_projection_replace"
