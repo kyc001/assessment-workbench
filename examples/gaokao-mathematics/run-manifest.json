@@ -1,0 +1,53 @@
+{
+  "format_version": "1",
+  "case_study": "gaokao-mathematics-v1",
+  "source_parent_run_id": "ec30336f-b94c-4de3-bff4-48ac62cb1843",
+  "release_run_id": "da4d42fe-4547-4e10-a20d-5a7189f6bf95",
+  "release_created_at": "2026-07-13T16:08:52.376035+00:00",
+  "release_completed_at": "2026-07-13T16:10:26.588942+00:00",
+  "exam": {
+    "subject": "高考数学",
+    "questions": 19,
+    "total_score": 150,
+    "duration_minutes": 120
+  },
+  "documents": [
+    {
+      "view": "questions",
+      "run_id": "126a822c-8a4c-41d5-977f-bb3bc9d6d427",
+      "pages": 5,
+      "build_seconds": 18.634,
+      "pdf": "artifacts/exam-questions.pdf",
+      "pdf_sha256": "426fe6efed2cf278a50cc9054df8009f3b04cb9cb60f815b964bb0f29cea552c",
+      "inspection": "artifacts/exam-questions.inspection.json",
+      "inspection_sha256": "b5367f1bd42d4a50b6c671544084acb07c76913df0df715ac2916b5ff6eb05e6",
+      "passed": true,
+      "blocking_findings": 0
+    },
+    {
+      "view": "solutions",
+      "run_id": "107e3d07-cfe5-457e-8b71-f29cf8abe9b4",
+      "pages": 16,
+      "build_seconds": 24.164,
+      "pdf": "artifacts/exam-solutions.pdf",
+      "pdf_sha256": "fc500ed100a56d19bf715e1ff5d304c97cff5a3f852132606e37fd25719c394e",
+      "inspection": "artifacts/exam-solutions.inspection.json",
+      "inspection_sha256": "a98044aa1ff6f5a51211ee4621f2779dea4a19261aaeb25121c73f2c7f4e77bb",
+      "passed": true,
+      "blocking_findings": 0
+    },
+    {
+      "view": "rubric",
+      "run_id": "9a3bc6e8-bc9b-40a5-b855-cecb5b06baf1",
+      "pages": 13,
+      "build_seconds": 21.346,
+      "pdf": "artifacts/exam-rubric.pdf",
+      "pdf_sha256": "3a7eb9732c4b0ab490b43c5afcb6f4c769095f15177ac7fc1dee17591079d870",
+      "inspection": "artifacts/exam-rubric.inspection.json",
+      "inspection_sha256": "d42e858bae87c26981a8407aa35868f57d7a63befa708771bc904053bfb044c9",
+      "passed": true,
+      "blocking_findings": 0
+    }
+  ],
+  "evidence_scope": "Acceptance-run evidence for workflow completion, artifact integrity, and PDF rendering. Not an expert quality benchmark or a baseline comparison."
+}

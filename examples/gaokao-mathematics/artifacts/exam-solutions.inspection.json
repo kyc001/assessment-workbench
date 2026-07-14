@@ -1,0 +1,160 @@
+{
+  "view": "solutions",
+  "pdf_artifact_id": "90d6e5f2-d87e-40df-861d-b3dbcb922bd5",
+  "page_count": 16,
+  "extracted_text_sha256": "f922189dcebcd41811d4838127ffeeb816496c14e6aa4a467cbc9a3a5d27fa0e",
+  "pages": [
+    {
+      "page_number": 1,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 415,
+      "ink_ratio": 0.06123961803950326,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "a56ea602-e398-46bf-b3dd-6d9b0d668e3b"
+    },
+    {
+      "page_number": 2,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 456,
+      "ink_ratio": 0.0586570804572048,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "fc37e784-6684-49d8-bfa2-9a11a1d5d853"
+    },
+    {
+      "page_number": 3,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 443,
+      "ink_ratio": 0.06616556935388736,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "c16fcae2-064d-48b2-9c89-8d1817a2739d"
+    },
+    {
+      "page_number": 4,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 413,
+      "ink_ratio": 0.05192972947121746,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "a541fafc-f983-4c08-b8a9-901a31e44444"
+    },
+    {
+      "page_number": 5,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 489,
+      "ink_ratio": 0.06449170240239761,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "280cbf34-5e29-4ff0-9e6c-dc4f255dc955"
+    },
+    {
+      "page_number": 6,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 441,
+      "ink_ratio": 0.05853751853209839,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "c7991e32-4717-4499-9cc0-8d7233a91526"
+    },
+    {
+      "page_number": 7,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 619,
+      "ink_ratio": 0.08163688246265682,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "3cabf0b0-7538-4f6d-9c05-519f206562b9"
+    },
+    {
+      "page_number": 8,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 550,
+      "ink_ratio": 0.07038211991264008,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "aa2c7ace-5934-44a8-bc32-9d429ad4777c"
+    },
+    {
+      "page_number": 9,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 461,
+      "ink_ratio": 0.05640931626520429,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "7c5fc363-e153-42c0-8ec9-ffbe682348f8"
+    },
+    {
+      "page_number": 10,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 407,
+      "ink_ratio": 0.05888026271740343,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "6f5ed648-3715-409a-b01a-f62bb698f0c1"
+    },
+    {
+      "page_number": 11,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 640,
+      "ink_ratio": 0.07482982352659855,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "25a2b03f-0219-45f4-aa0b-2e05cdfecefd"
+    },
+    {
+      "page_number": 12,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 503,
+      "ink_ratio": 0.06669961261936265,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "1e9857db-8a1d-4c12-9b48-80fc267b534e"
+    },
+    {
+      "page_number": 13,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 645,
+      "ink_ratio": 0.07876739626010298,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "01944e46-eb9a-47e7-bc04-fdc5d418cad2"
+    },
+    {
+      "page_number": 14,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 615,
+      "ink_ratio": 0.08078400739689777,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "96a79435-af3b-4b41-9ff8-0815582b2ebf"
+    },
+    {
+      "page_number": 15,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 682,
+      "ink_ratio": 0.08730411771270066,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "b5a42a80-e603-49ac-a832-4e6265560823"
+    },
+    {
+      "page_number": 16,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 237,
+      "ink_ratio": 0.0295317955012833,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "f032bbd4-d8a5-4d8d-844f-5349c301a1c9"
+    }
+  ],
+  "blocking_findings": [],
+  "warnings": [],
+  "manual_checks_required": [
+    "check every rendered page for overlap, clipping, and repeated labels",
+    "check Chinese text and mathematical notation for visual legibility",
+    "check all questions, solutions, final answers, and rubric content for correctness"
+  ],
+  "passed": true
+}

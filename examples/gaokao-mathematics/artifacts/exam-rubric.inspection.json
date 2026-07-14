@@ -1,0 +1,133 @@
+{
+  "view": "rubric",
+  "pdf_artifact_id": "fa2261cd-4ae8-40f4-bd70-96628cfd41a0",
+  "page_count": 13,
+  "extracted_text_sha256": "045b6c0943f617c32cce78296c4c20f5447cc66d108e96f65e12fb2b24bf04d0",
+  "pages": [
+    {
+      "page_number": 1,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 422,
+      "ink_ratio": 0.0692901209966682,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "79c0848c-a267-49bb-8661-1006b6dce084"
+    },
+    {
+      "page_number": 2,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 455,
+      "ink_ratio": 0.06592644550367453,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "fd2548db-96b4-414f-8c7c-4ff3e1201822"
+    },
+    {
+      "page_number": 3,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 311,
+      "ink_ratio": 0.03878588850451944,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "0b6b7e0f-b1f0-4219-94e7-8d101cac844e"
+    },
+    {
+      "page_number": 4,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 509,
+      "ink_ratio": 0.07193642493902341,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "550ebde6-7362-430f-98b7-dd18e2f24544"
+    },
+    {
+      "page_number": 5,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 836,
+      "ink_ratio": 0.12000828962680737,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "72b27c22-45fd-41da-a1e1-d56952c01391"
+    },
+    {
+      "page_number": 6,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 317,
+      "ink_ratio": 0.04248433738781106,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "f698bd6e-5189-4c70-a499-8e485054639e"
+    },
+    {
+      "page_number": 7,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 315,
+      "ink_ratio": 0.04823925138293293,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "86286812-cfc9-4549-b22d-96907cc6319e"
+    },
+    {
+      "page_number": 8,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 626,
+      "ink_ratio": 0.0865787753670551,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "4fb53349-7e24-44fc-993b-5f3e1685cad6"
+    },
+    {
+      "page_number": 9,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 499,
+      "ink_ratio": 0.06763219563519265,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "905e1569-2ac4-4b2b-9cef-0b866ae52495"
+    },
+    {
+      "page_number": 10,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 637,
+      "ink_ratio": 0.0796760668909117,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "581b73dc-7b44-451d-b5b2-d11b9d309851"
+    },
+    {
+      "page_number": 11,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 682,
+      "ink_ratio": 0.0924452804922763,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "9c01c56a-ece8-4ed6-94ed-c56452b28559"
+    },
+    {
+      "page_number": 12,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 661,
+      "ink_ratio": 0.08856350332382151,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "d291406b-832d-4c2e-a0a0-43d3182fef81"
+    },
+    {
+      "page_number": 13,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 66,
+      "ink_ratio": 0.008249772832342298,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "dc65ce77-f0ff-4183-8453-1ea9317604a1"
+    }
+  ],
+  "blocking_findings": [],
+  "warnings": [],
+  "manual_checks_required": [
+    "check every rendered page for overlap, clipping, and repeated labels",
+    "check Chinese text and mathematical notation for visual legibility",
+    "check all questions, solutions, final answers, and rubric content for correctness"
+  ],
+  "passed": true
+}

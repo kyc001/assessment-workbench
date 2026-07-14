@@ -1,0 +1,61 @@
+{
+  "view": "questions",
+  "pdf_artifact_id": "4ba77214-8f68-4477-83aa-a2ed0bc6b5dc",
+  "page_count": 5,
+  "extracted_text_sha256": "e51528bd9c27814224e362726609260632705fc65d8e66b6703d710b01e140cd",
+  "pages": [
+    {
+      "page_number": 1,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 311,
+      "ink_ratio": 0.04631828978622328,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "25507232-3c13-4b18-943f-9a384a015d2e"
+    },
+    {
+      "page_number": 2,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 377,
+      "ink_ratio": 0.04956240335411054,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "168b9d3f-5fa5-403c-b18e-ee1c144d8b83"
+    },
+    {
+      "page_number": 3,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 478,
+      "ink_ratio": 0.06698656123961803,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "79658acb-0115-4c89-9ff6-61a89a208a2b"
+    },
+    {
+      "page_number": 4,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 485,
+      "ink_ratio": 0.07254220535956256,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "9e13c02d-53f3-45f1-9fc1-fba9a0696cb7"
+    },
+    {
+      "page_number": 5,
+      "width_points": 595.28,
+      "height_points": 841.89,
+      "text_characters": 409,
+      "ink_ratio": 0.06127947201453873,
+      "edge_ink_ratio": 0.0,
+      "image_artifact_id": "378943b6-ef7a-4029-981f-7a9db2b7cc84"
+    }
+  ],
+  "blocking_findings": [],
+  "warnings": [],
+  "manual_checks_required": [
+    "check every rendered page for overlap, clipping, and repeated labels",
+    "check Chinese text and mathematical notation for visual legibility",
+    "check all questions, solutions, final answers, and rubric content for correctness"
+  ],
+  "passed": true
+}

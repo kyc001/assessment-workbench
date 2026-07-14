@@ -1,32 +1,47 @@
-# 高考数学动态生成 Demo
+# 高考数学整卷 Demo
 
-该示例只预设考试结构，不包含任何静态题目、答案或 Rubric。运行时会使用锁定的 19 题、150 分、120 分钟蓝图，并通过 Agent 动态生成每道题及其独立解答、Rubric、审核和仲裁结果。
+这是一个由 Assessment Workbench 完成的真实整卷验收案例，展示从结构化题目 Bundle 到试题卷、答案卷和评分细则三份 PDF 的发布链路。
 
-先初始化工作区：
+## 可下载产物
+
+| 视图 | 页数 | 机器检查 | 文件 |
+| --- | ---: | --- | --- |
+| 试题卷 | 5 | passed，0 blocking findings | [exam-questions.pdf](artifacts/exam-questions.pdf) |
+| 答案卷 | 16 | passed，0 blocking findings | [exam-solutions.pdf](artifacts/exam-solutions.pdf) |
+| 评分细则 | 13 | passed，0 blocking findings | [exam-rubric.pdf](artifacts/exam-rubric.pdf) |
+
+对应的全页渲染检查报告位于 [`artifacts/`](artifacts/)；[`run-manifest.json`](run-manifest.json) 记录来源 run、文件哈希、构建耗时和证据边界。
+
+## 案例范围
+
+- 科目：高考数学
+- 结构：19 题，150 分，120 分钟
+- 发布形式：试题、逐题解答、逐点 Rubric
+- 文档流水线：LaTeX -> Tectonic -> PDF -> Poppler 全页渲染 -> 页面检查
+- 发布来源：动态生成后的版本化人工修订稿，通过统一的 edited assembly 与三视图发布流程生成
+
+## 复现新运行
 
 ```powershell
+uv sync
 uv run assessment-workbench workspace init workspaces/gaokao-math-demo
-```
 
-再运行生成命令：
-
-```powershell
 uv run assessment-workbench exams generate `
   --subject "高考数学" `
   --target-level "高中毕业年级" `
-  --requirements "按当前全国统一考试数学结构生成原创模拟卷，不直接改写既有真题。" `
+  --requirements "19 题，150 分，标准模拟卷" `
   --workspace workspaces/gaokao-math-demo
 ```
 
-`高考数学` 会自动解析到内置能力包。能力包锁定结构、命题规则、Reviewer 和确定性校验器；`examples/` 下的 Profile 与 Blueprint 仍可作为显式约束示例。使用普通 `高中数学` 或其他未注册科目时，系统不会套用整卷结构，而是由 Subject Research Agent 和 Blueprint Agent 动态设计。
-
-该命令会触发 19 道题的完整动态生成和审核链，模型调用数量较多。自动化测试只使用小型类型化 fixture 验证预设分支，不会运行完整真实模型整卷。
-
-CLI 默认在整卷组装后暂停，确认产物后继续：
+默认启用人工门禁。检查题目与整卷产物后继续：
 
 ```powershell
 uv run assessment-workbench runs approve <run-id> --workspace workspaces/gaokao-math-demo
 uv run assessment-workbench runs resume <run-id> --workspace workspaces/gaokao-math-demo
 ```
 
-无人值守的验收运行可以在生成命令中增加 `--no-human-gates`。该选项只关闭人工暂停，不会关闭题目审核、仲裁或确定性校验。
+## 证据边界
+
+这个 Demo 能证明：19 道题可以经过版本化组卷，三类 PDF 能并行编译、逐页渲染、机器检查并形成可追溯发布 Bundle。
+
+它不能单独证明：题目达到真实高考命题质量、答案经独立专家审核，或多 Agent 在同预算下优于单 Agent。此类结论需要单独的盲评和对照实验。
