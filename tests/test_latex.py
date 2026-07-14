@@ -101,6 +101,20 @@ def test_latex_safety_checks() -> None:
         validate_exam_latex(r"\documentclass{article}\begin{document}\end{document}")
 
 
+def test_math_blocks_normalize_double_escaped_commands_but_preserve_rows() -> None:
+    block = ExamContentBlock(
+        kind=ExamContentKind.DISPLAY_MATH,
+        content=r"(x \\lor y) \\land (x \\lor \\neg y)",
+    )
+    aligned = ExamContentBlock(
+        kind=ExamContentKind.DISPLAY_MATH,
+        content=r"\begin{aligned}a_3&=3,\\a_4&=4\end{aligned}",
+    )
+
+    assert block.content == r"(x \lor y) \land (x \lor \neg y)"
+    assert aligned.content == r"\begin{aligned}a_3&=3,\\a_4&=4\end{aligned}"
+
+
 def test_renderer_preserves_structured_mathematics() -> None:
     exam = build_exam()
     exam.questions[0].question.statement = [

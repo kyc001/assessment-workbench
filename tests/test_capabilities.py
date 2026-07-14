@@ -14,7 +14,7 @@ def test_default_prompt_registry_owns_role_and_version() -> None:
     prompt = catalog.prompts.require("question_writer")
 
     assert prompt.role == "question_writer"
-    assert prompt.version == "question-writer-v2"
+    assert prompt.version == "question-writer-v3"
     assert "original" in prompt.system_prompt
 
     with pytest.raises(ValueError, match="not registered"):

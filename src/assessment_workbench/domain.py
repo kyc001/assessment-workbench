@@ -177,6 +177,19 @@ class ExamContentKind(StrEnum):
     DISPLAY_MATH = "display_math"
 
 
+_STRUCTURED_MATH_ENVIRONMENT = re.compile(
+    r"\\begin\{(?:aligned|alignedat|array|matrix|pmatrix|bmatrix|vmatrix|Vmatrix|"
+    r"smallmatrix|cases|gathered|split)\*?\}"
+)
+_DOUBLE_ESCAPED_LATEX_COMMAND = re.compile(r"\\\\(?=[A-Za-z])")
+
+
+def _normalize_latex_command_escapes(content: str) -> str:
+    if _STRUCTURED_MATH_ENVIRONMENT.search(content):
+        return content
+    return _DOUBLE_ESCAPED_LATEX_COMMAND.sub(lambda _: "\\", content)
+
+
 class ExamContentBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -199,6 +212,7 @@ class ExamContentBlock(BaseModel):
                 break
         if content and set(content) == {"_"}:
             content = r"\underline{\hspace{2cm}}"
+        content = _normalize_latex_command_escapes(content)
         content = content.translate(
             {
                 ord("，"): ",",
