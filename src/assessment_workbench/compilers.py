@@ -32,8 +32,6 @@ _BLOCKING_LATEX_DIAGNOSTICS = (
     "could not represent character",
     r"overfull \hbox",
     r"overfull \vbox",
-    r"underfull \hbox",
-    r"underfull \vbox",
 )
 
 

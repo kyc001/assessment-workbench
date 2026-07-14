@@ -325,6 +325,11 @@ class RunStore:
             raise KeyError(f"run not found: {decision.run_id}")
         if run.status is not RunStatus.WAITING_HUMAN:
             raise ValueError(f"run is not waiting for human review: {run.status}")
+        if decision.decision not in request.allowed_decisions:
+            raise ValueError(
+                f"human decision {decision.decision.value!r} is not allowed for phase "
+                f"{request.phase!r}"
+            )
         checkpoint: WorkflowCheckpoint | None = None
         if decision.decision in {
             HumanDecisionType.ACCEPT,

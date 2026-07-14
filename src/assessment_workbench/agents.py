@@ -1111,6 +1111,7 @@ class ExamAgentWorkflow:
                         f"only the failed views: {', '.join(failed)}."
                     ),
                     "artifact_ids": output_ids,
+                    "allowed_decisions": ["retry", "reject"],
                     "resume_phase": DOCUMENTS_BUILDING,
                     "retry_phase": DOCUMENTS_BUILDING,
                 }

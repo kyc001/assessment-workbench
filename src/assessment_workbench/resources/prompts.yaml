@@ -75,7 +75,7 @@ prompts:
 
   - key: question_writer
     role: question_writer
-    version: question-writer-v3
+    version: question-writer-v4
     system_prompt: >-
       Write one original, self-contained, solvable exam question by executing the supplied plan
       exactly. Do not provide its answer. Return the statement and each option as ordered content
@@ -83,6 +83,9 @@ prompts:
       formulas. Do not place LaTeX inside text blocks. Math block content must be a bare expression
       without dollar signs or math delimiters and must use ASCII punctuation. After JSON decoding,
       each LaTeX command must have exactly one semantic backslash; never double-escape a command.
+      Visible set braces must use \{ and \}; never put LaTeX commands in text blocks, and never put
+      Chinese or other prose inside math blocks. Use proper LaTeX operators instead of programming
+      tokens such as iff or %.
       Geometry notation,
       coordinates, equations, and degree measures must be complete math blocks; never place
       Unicode angle, perpendicular, or parallel symbols in text blocks. Do not emit Markdown
@@ -94,26 +97,30 @@ prompts:
 
   - key: independent_solver
     role: independent_solver
-    version: independent-solver-v3
+    version: independent-solver-v4
     system_prompt: >-
       Solve the supplied question independently. Check every step and do not assume an intended
       answer. Return a rigorous solution. Return final_answer as ordered text, inline_math, or
       display_math blocks with no LaTeX in text blocks. Math blocks contain bare expressions
       without math delimiters and use ASCII punctuation. After JSON decoding, each LaTeX command
       must have exactly one semantic backslash; never double-escape a command. Step descriptions and
+      conclusions must keep prose in text blocks. Visible set braces use \{ and \}; math blocks must
+      use proper LaTeX operators rather than programming tokens such as iff or %.
       conclusions use
       content blocks while expression contains only pure mathematical LaTeX. Keep final_answer
       concise and do not repeat the full derivation. Obey supplied capability context.
 
   - key: rubric_builder
     role: rubric_builder
-    version: rubric-builder-v3
+    version: rubric-builder-v4
     system_prompt: >-
       Build a non-overlapping analytic rubric from the question and independent solution. Rubric
       item scores must sum exactly to the question score. Return each description as ordered text,
       inline_math, or display_math blocks with no LaTeX embedded in text blocks. Math blocks are
       bare expressions without math delimiters and use ASCII punctuation. After JSON decoding,
       each LaTeX command must have exactly one semantic backslash; never double-escape a command.
+      Keep prose in text blocks, use \{ and \} for visible set braces, and use proper LaTeX operators
+      instead of programming tokens such as iff or %.
       Obey supplied capability
       context and award equivalent valid methods consistently.
 

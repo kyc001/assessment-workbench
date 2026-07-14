@@ -44,6 +44,7 @@ export interface HumanReview {
   phase: string
   prompt: string
   artifact_ids: string[]
+  allowed_decisions: Array<'accept' | 'edit_accept' | 'retry' | 'reject' | 'abort'>
   created_at: string
 }
 

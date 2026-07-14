@@ -82,7 +82,7 @@ def test_renderer_separates_views_and_escapes_text() -> None:
     assert "最终答案" not in questions
     assert "最终答案" in solutions
     assert "评分标准" in rubric
-    assert r"x\_1 \& x\_2" in questions
+    assert r"\ensuremath{x_1} \& \ensuremath{x_2}" in questions
     assert r"\awquestion{第1题（10分）}" in questions
     assert renderer.render(exam, ExamView.QUESTIONS) == questions
 
@@ -96,6 +96,7 @@ def test_latex_safety_checks() -> None:
 
     with pytest.raises(LatexCompileError, match="blocking diagnostic"):
         validate_latex_log(r"warning: Overfull \vbox (12.0pt too high)")
+    validate_latex_log(r"warning: Underfull \hbox (badness 2941)")
 
     with pytest.raises(LatexTemplateError, match="template contract"):
         validate_exam_latex(r"\documentclass{article}\begin{document}\end{document}")
@@ -128,6 +129,43 @@ def test_renderer_preserves_structured_mathematics() -> None:
 
     assert r"$x_1+x_2=3$" in rendered
     assert r"\[x_1^2+x_2^2\]" in rendered
+
+
+def test_renderer_normalizes_real_document_regressions() -> None:
+    text = [
+        ExamContentBlock(
+            kind=ExamContentKind.TEXT,
+            content="¬ 表示取反，∧ 表示与，∨ 表示或。",
+        )
+    ]
+    modulo = ExamContentBlock(
+        kind=ExamContentKind.DISPLAY_MATH,
+        content="xRy iff x % 3 = y % 3",
+    )
+    aligned = ExamContentBlock(
+        kind=ExamContentKind.DISPLAY_MATH,
+        content=(
+            r"\begin{aligned}[0]_R&=\{0,3,6,9\},\\"
+            r"[1]_R&=\{1,4,7,10\}\end{aligned}"
+        ),
+    )
+
+    assert render_content(text) == r"$\neg$ 表示取反，$\land$ 表示与，$\lor$ 表示或。"
+    assert validate_math(modulo.content) == (r"xRy \Longleftrightarrow x \bmod 3 = y \bmod 3")
+    normalized_aligned = validate_math(aligned.content)
+    assert normalized_aligned.startswith(r"\begin{aligned}\lbrack 0\rbrack_R")
+    assert r"\\\lbrack 1\rbrack_R" in normalized_aligned
+    assert validate_math("delta(S) 中最轻边为 e") == (r"\delta(S) \text{中最轻边为} e")
+
+
+def test_renderer_wraps_long_top_level_comma_displays() -> None:
+    expression = ", ".join(f"w(e_{index})={index}" for index in range(1, 16))
+    rendered = render_content(
+        [ExamContentBlock(kind=ExamContentKind.DISPLAY_MATH, content=expression)]
+    )
+
+    assert r"\begin{aligned}" in rendered
+    assert r" \\ " in rendered
 
 
 def test_renderer_keeps_choice_math_inline_and_reserves_question_space() -> None:

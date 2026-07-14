@@ -4,6 +4,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from assessment_workbench.domain import (
+    HumanDecisionType,
     HumanReviewRequest,
     PhaseEvent,
     PhaseStatus,
@@ -217,6 +218,13 @@ class WorkflowEngine:
                         phase=phase,
                         prompt=str(human_review.get("prompt", "Review required")),
                         artifact_ids=_artifact_ids(human_review.get("artifact_ids")),
+                        allowed_decisions=[
+                            HumanDecisionType(value)
+                            for value in human_review.get(
+                                "allowed_decisions",
+                                list(HumanDecisionType),
+                            )
+                        ],
                         resume_step_index=resume_step_index,
                         retry_step_index=retry_step_index,
                     )

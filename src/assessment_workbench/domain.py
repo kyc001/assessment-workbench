@@ -182,6 +182,7 @@ _STRUCTURED_MATH_ENVIRONMENT = re.compile(
     r"smallmatrix|cases|gathered|split)\*?\}"
 )
 _DOUBLE_ESCAPED_LATEX_COMMAND = re.compile(r"\\\\(?=[A-Za-z])")
+_LATEX_MATH_DELIMITER = re.compile(r"(?<!\\)\\(?:\(|\)|\[|\])")
 
 
 def _normalize_latex_command_escapes(content: str) -> str:
@@ -221,8 +222,7 @@ class ExamContentBlock(BaseModel):
                 ord("："): ":",
             }
         )
-        forbidden = ("$", r"\(", r"\)", r"\[", r"\]")
-        if any(token in content for token in forbidden):
+        if "$" in content or _LATEX_MATH_DELIMITER.search(content):
             raise ValueError("math content must not include LaTeX math delimiters")
         self.content = content
         return self
@@ -1316,6 +1316,15 @@ class HumanReviewRequest(BaseModel):
     phase: str
     prompt: str
     artifact_ids: list[UUID] = Field(default_factory=list)
+    allowed_decisions: list[HumanDecisionType] = Field(
+        default_factory=lambda: [
+            HumanDecisionType.ACCEPT,
+            HumanDecisionType.EDIT_ACCEPT,
+            HumanDecisionType.RETRY,
+            HumanDecisionType.REJECT,
+            HumanDecisionType.ABORT,
+        ]
+    )
     resume_step_index: int = Field(default=0, ge=0)
     retry_step_index: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=now_utc)

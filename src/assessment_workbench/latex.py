@@ -27,7 +27,7 @@ _EXAM_LAYOUT_COMMANDS = r"""
 
 GENERIC_LATEX_REVIEW_CONTEXT = {
     "renderer": "generic-latex",
-    "template_version": "generic-v3",
+    "template_version": "generic-v4",
     "output_target": "A4 PDF rendered by ctexart and Tectonic",
     "choice_labels": (
         "The renderer automatically labels ordered option arrays as A, B, C, D. "
@@ -42,7 +42,7 @@ GENERIC_LATEX_REVIEW_CONTEXT = {
 
 class GenericLatexRenderer:
     name = "generic-latex"
-    template_version = "generic-v3"
+    template_version = "generic-v4"
 
     def render(self, exam: ExamDocument, view: ExamView) -> str:
         chinese = exam.language.startswith("zh")
@@ -69,6 +69,7 @@ class GenericLatexRenderer:
             "\\usepackage{needspace}\n"
             "\\allowdisplaybreaks\n"
             "\\setlength{\\parindent}{0pt}\n"
+            "\\setlength{\\emergencystretch}{3em}\n"
             "\\setlist{nosep}\n"
             f"{_EXAM_LAYOUT_COMMANDS}\n"
             "\\begin{document}\n"
@@ -118,7 +119,7 @@ class GenericLatexRenderer:
             for step in bundle.solution.steps:
                 lines.append(f"\\item {render_content(step.description)}")
                 if step.expression:
-                    lines.append(f"\\[{validate_math(step.expression)}\\]")
+                    lines.append(_render_display_math(step.expression))
                 if step.conclusion:
                     lines.append(render_content(step.conclusion))
             lines.extend(
@@ -183,10 +184,66 @@ def render_content(blocks: list[ExamContentBlock], *, allow_display_math: bool =
         elif block.kind is ExamContentKind.INLINE_MATH:
             rendered.append(f"${validate_math(block.content)}$")
         elif allow_display_math and _is_standalone_display(blocks, index):
-            rendered.append(f"\n\\[{validate_math(block.content)}\\]\n")
+            rendered.append(f"\n{_render_display_math(block.content)}\n")
         else:
             rendered.append(f"${validate_math(block.content)}$")
     return "".join(rendered)
+
+
+def _render_display_math(expression: str) -> str:
+    return f"\\[{_layout_display_math(validate_math(expression))}\\]"
+
+
+def _layout_display_math(expression: str) -> str:
+    if len(expression) <= 96 or r"\begin{" in expression:
+        return expression
+    segments = _split_top_level_commas(expression)
+    if len(segments) < 2:
+        return expression
+
+    lines: list[str] = []
+    current = ""
+    for index, segment in enumerate(segments):
+        suffix = "," if index + 1 < len(segments) else ""
+        candidate = f"{current} {segment}{suffix}".strip()
+        if current and len(candidate) > 72:
+            lines.append(current)
+            current = f"{segment}{suffix}"
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) < 2:
+        return expression
+    body = r" \\ ".join(f"&{line}" for line in lines)
+    return rf"\begin{{aligned}}{body}\end{{aligned}}"
+
+
+def _split_top_level_commas(expression: str) -> list[str]:
+    segments: list[str] = []
+    start = 0
+    depths = {"{": 0, "(": 0, "[": 0}
+    closing = {"}": "{", ")": "(", "]": "["}
+    escaped = False
+    for index, character in enumerate(expression):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character in depths:
+            depths[character] += 1
+            continue
+        opening = closing.get(character)
+        if opening is not None:
+            depths[opening] = max(0, depths[opening] - 1)
+            continue
+        if character == "," and not any(depths.values()):
+            segments.append(expression[start:index].strip())
+            start = index + 1
+    segments.append(expression[start:].strip())
+    return [segment for segment in segments if segment]
 
 
 def _is_standalone_display(blocks: list[ExamContentBlock], index: int) -> bool:
@@ -249,6 +306,9 @@ def _render_text(text: str) -> str:
         "±": r"$\pm$",
         "×": r"$\times$",
         "→": r"$\to$",
+        "¬": r"$\neg$",
+        "∧": r"$\land$",
+        "∨": r"$\lor$",
     }
     for symbol, replacement in math_symbols.items():
         rendered = rendered.replace(symbol, replacement)
@@ -295,6 +355,29 @@ def validate_math(expression: str) -> str:
 
 def _normalize_math(expression: str) -> str:
     normalized = expression
+    normalized = re.sub(
+        r"(?P<row>\\\\)\[(?P<value>[^\[\]\n]+)\]_(?=[A-Za-z{\\])",
+        lambda match: f"{match.group('row')}\\lbrack {match.group('value')}\\rbrack_",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?<!\\)\[(?P<value>[^\[\]\n]+)\]_(?=[A-Za-z{\\])",
+        lambda match: rf"\lbrack {match.group('value')}\rbrack_",
+        normalized,
+    )
+    normalized = re.sub(
+        r"(?<=[A-Za-z0-9)}\]])\s*(?<!\\)%\s*(?=[A-Za-z0-9({\\])",
+        r" \\bmod ",
+        normalized,
+    )
+    normalized = re.sub(r"(?<!\\)%", r"\\%", normalized)
+    normalized = re.sub(r"(?<!\\)\biff\b", r"\\Longleftrightarrow", normalized)
+    normalized = re.sub(r"(?<!\\)\bdelta\b", r"\\delta", normalized)
+    normalized = re.sub(
+        r"[\u3400-\u9fff\u3000-\u303f\uff00-\uffef]+",
+        lambda match: rf"\text{{{match.group(0)}}}",
+        normalized,
+    )
     normalized = re.sub(r"(?<!\\)\bmax\b", r"\\max", normalized)
     normalized = re.sub(r"(?<!\\)\bmin\b", r"\\min", normalized)
     normalized = re.sub(r"\s+at\s+", r" \\text{ at } ", normalized)

@@ -209,13 +209,13 @@ DOCUMENTS_BUILDING
 
 每个 child 先提交已校验 TeX，再调用 Tectonic。编译失败仍保存 TeX 和失败日志；兄弟视图继续执行。父运行的 `document-build-runs.json` 同时维护 editable 实时投影和不可变快照，输入签名一致且 Artifact 完整的成功视图在恢复时复用，只重跑失败、缺失或过期视图。
 
-`generic-v3` Renderer 会把文本之间的短 `display_math` 降级为行内数学，避免模型把单个变量切成
+`generic-v4` Renderer 会把文本之间的短 `display_math` 降级为行内数学，避免模型把单个变量切成
 居中段落；常见伪 LaTeX（`sqrt(...)`、`degrees`、`in {..}`、操作数间 `*`、`<=`/`>=`）、Unicode
 数学符号、文本下标、单位幂和数学块中的自然语言连接词在安全校验后统一规范化。长推导可使用
 `aligned` 显式换行。数学归一化不能改写 `\mathbb N^*` 等合法记号，Tectonic 日志中的缺字、
-Fontconfig、overfull 和 underfull 仍是阻断错误，不能通过放宽门禁掩盖。
+Fontconfig、缺字和 overfull 仍是阻断错误；underfull 只记录为排版警告，并由页面检查确认可读性。
 
-Poppler Inspector 使用 `pdfinfo`、`pdftotext` 和 `pdftoppm` 检查页数、A4 尺寸、文本层、连续题号、分区与视图专属标签，并把全部页面写成 PNG Artifact。灰度页只用于发现空白页和内容贴边风险。机器报告明确保留重叠、公式可读性、内容与推导正确性等人工检查项；启用 human gates 时，全部页面批准后才写 `document-acceptance.json`。
+Poppler Inspector 使用 `pdfinfo`、`pdftotext` 和 `pdftoppm` 检查页数、A4 尺寸、文本层、连续题号、分区与视图专属标签，并把全部页面写成 PNG Artifact。Windows 上的裸命令会跨 PATH 优先解析真实 `.exe/.com`，避免前置但失效的 `.cmd` shim 阻断全部文档视图。灰度页只用于发现空白页和内容贴边风险。机器报告明确保留重叠、公式可读性、内容与推导正确性等人工检查项；启用 human gates 时，全部页面批准后才写 `document-acceptance.json`。
 
 `exam-release-bundle.json` 是发布入口。它以 Artifact ID 和 SHA-256 绑定 Exam、全部逐题 Bundle、审核仲裁、ContextPack/ModelCall、三视图 TeX/PDF/日志、检查报告、页面图片和人工验收。发布前重新读取每个 Artifact 验证哈希；缺引用、失败视图或未完成的人工门禁都会拒绝发布。无 Compiler/Inspector 的内容模式可以完成到 `ExamDocument`，但不会生成发布 Bundle。
 

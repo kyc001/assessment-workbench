@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -213,13 +214,29 @@ class PopplerPdfInspector:
 
 
 def _resolve_executable(command: str) -> str:
-    executable = shutil.which(command)
-    if executable is not None:
-        return executable
     candidate = Path(command)
     if candidate.is_file():
         return str(candidate)
+    if os.name == "nt" and not candidate.suffix and candidate.parent == Path("."):
+        native_executable = _find_windows_native_executable(command)
+        if native_executable is not None:
+            return native_executable
+    executable = shutil.which(command)
+    if executable is not None:
+        return executable
     raise PdfInspectionError(f"PDF inspection executable not found: {command}")
+
+
+def _find_windows_native_executable(command: str) -> str | None:
+    for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
+        directory = raw_directory.strip().strip('"')
+        if not directory:
+            continue
+        for suffix in (".exe", ".com"):
+            candidate = Path(directory) / f"{command}{suffix}"
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 def _parse_pdf_info(output: str) -> tuple[int, float, float]:

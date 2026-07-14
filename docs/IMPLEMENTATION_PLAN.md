@@ -31,7 +31,7 @@
 - Luna/Terra 模型分层：高并发生成走 Luna，研究、规划、解题、审核和仲裁走 Terra。
 - 单题 Writer/Solver/Rubric 可恢复阶段、Reviewer 独立 grandchild、逐题并行即时落盘和单题重跑。
 - 整卷确定性/语义审核、局部仲裁、计划修订、child 替换和 warning 非阻断护栏。
-- 三视图独立文档 child、`generic-v3` Renderer、Tectonic、Poppler 全页检查和发布 Bundle。
+- 三视图独立文档 child、`generic-v4` Renderer、Tectonic、Poppler 全页检查和发布 Bundle。
 - 本地单用户 FastAPI + React GUI、SSE/轮询恢复、逐题编辑/重跑、Artifact 和三视图 PDF 查看。
 
 部分实现但尚未达到完成定义：
@@ -451,7 +451,7 @@ uv run assessment-workbench --help
 ## M7.2 Renderer
 
 - [x] Generic LaTeX Renderer。
-- [x] `generic-v3` 规范化 Unicode 数学符号、文本下标、单位幂、数学连接词和长公式 `aligned`。
+- [x] `generic-v4` 规范化 Unicode 数学符号、文本下标、单位幂、数学连接词和长公式 `aligned`。
 - [ ] Markdown Renderer。
 - [ ] JSON Renderer。
 - [ ] 领域定制 Renderer 作为独立可选模板。 
@@ -467,7 +467,7 @@ uv run assessment-workbench --help
 - [x] 三视图分别执行 `DOCUMENT_RENDERING/PDF_COMPILING/PDF_INSPECTING` child run。
 - [ ] `TEMPLATE_FIXING` 只修排版，不重新命题。
 - [x] Poppler 全页 PNG、文本层、A4、空白/边缘风险和视图语义门禁。
-- [x] Fontconfig、缺字、overfull、underfull 和编译错误均作为最终发布阻断诊断。
+- [x] Fontconfig、缺字、overfull 和编译错误作为发布阻断诊断；underfull 保留日志并进入页面检查。
 
 完成定义：
 

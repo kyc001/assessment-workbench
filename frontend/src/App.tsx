@@ -99,6 +99,7 @@ function ActionBar({ snapshot, onChanged }: { snapshot: RunSnapshot; onChanged: 
     onSuccess: onChanged,
   })
   const waiting = run.status === 'waiting_human'
+  const allowed = new Set(snapshot.detail.human_review?.allowed_decisions || ['accept', 'retry', 'reject'])
   const resumable = run.status === 'interrupted'
   const cancellable = run.status === 'queued' || run.status === 'running'
   if (!waiting && !resumable && !cancellable) return null
@@ -108,9 +109,9 @@ function ActionBar({ snapshot, onChanged }: { snapshot: RunSnapshot; onChanged: 
         <>
           <div className="review-prompt"><AlertTriangle size={16} /><span>{snapshot.detail.human_review?.prompt || '等待人工确认'}</span></div>
           <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="可选：记录决定理由" />
-          <button className="button success" disabled={mutation.isPending} onClick={() => mutation.mutate('approve')}><Check size={15} />接受并继续</button>
-          <button className="button secondary" disabled={mutation.isPending} onClick={() => mutation.mutate('retry')}><RotateCcw size={15} />重试</button>
-          <button className="button danger ghost" disabled={mutation.isPending} onClick={() => mutation.mutate('reject')}><Ban size={15} />拒绝</button>
+          {allowed.has('accept') && <button className="button success" disabled={mutation.isPending} onClick={() => mutation.mutate('approve')}><Check size={15} />接受并继续</button>}
+          {allowed.has('retry') && <button className="button secondary" disabled={mutation.isPending} onClick={() => mutation.mutate('retry')}><RotateCcw size={15} />重试</button>}
+          {allowed.has('reject') && <button className="button danger ghost" disabled={mutation.isPending} onClick={() => mutation.mutate('reject')}><Ban size={15} />拒绝</button>}
         </>
       )}
       {resumable && <button className="button primary" disabled={mutation.isPending} onClick={() => mutation.mutate('resume')}><Play size={15} />恢复运行</button>}
