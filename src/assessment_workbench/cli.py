@@ -1,29 +1,47 @@
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import typer
 
-from assessment_workbench.agents import ExamAgentWorkflow, ModelRouter
-from assessment_workbench.compilers import TectonicCompiler
+from assessment_workbench.application import (
+    build_edited_exam_workflow,
+    build_exam_workflow,
+    latest_artifact_json,
+    open_workspace,
+    publish_question_bundle,
+)
 from assessment_workbench.config import Settings
+from assessment_workbench.document_workflow import latest_document_builds
 from assessment_workbench.domain import (
     ArtifactRef,
+    CalculatorPolicy,
+    DifficultyBasis,
+    DocumentBuildRunRecord,
     ExamBlueprint,
     ExamDocument,
     ExamQuestionBundle,
     HumanDecision,
     HumanDecisionType,
     MaterialKind,
+    PhaseEvent,
+    PhaseStatus,
+    QuestionGenerationRequest,
     QuestionPlan,
     QuestionType,
     RunStatus,
     SubjectProfile,
+    now_utc,
+)
+from assessment_workbench.exam_quality import (
+    validate_bundle_for_plan,
+    validate_question_plan_coverage,
+    validate_question_plan_timing,
 )
 from assessment_workbench.ingestion import MaterialIngestionWorkflow
-from assessment_workbench.latex_service import ExamLatexService
 from assessment_workbench.models import OpenAICompatibleModel
 from assessment_workbench.parsers import FixtureParser, MinerUApiParser, MinerUCliParser
 from assessment_workbench.planning import QuestionSpecWorkflow
@@ -36,7 +54,7 @@ from assessment_workbench.storage import (
     RunStore,
     Workspace,
 )
-from assessment_workbench.workflow import WorkflowEngine
+from assessment_workbench.subject_research_workflow import parse_subject_research_records
 
 app = typer.Typer(help="Course-grounded assessment workflows")
 workspace_app = typer.Typer(help="Initialize and inspect workspaces")
@@ -56,65 +74,77 @@ app.add_typer(exams_app, name="exams")
 
 
 def _workspace(path: Path | None) -> Workspace:
-    root = path or Settings().workspace
-    workspace = Workspace(root)
-    workspace.require_initialized()
-    RunStore(workspace).recover_orphaned()
-    return workspace
+    return open_workspace(path)
 
 
-def _exam_workflow(
+def _console_safe(value: object, *, err: bool = False) -> str:
+    text = str(value)
+    stream = sys.stderr if err else sys.stdout
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    return text.encode(encoding, errors="replace").decode(encoding)
+
+
+def _artifact_display_path(
     workspace: Workspace,
-    settings: Settings,
-    *,
-    compile_pdf: bool,
-) -> ExamAgentWorkflow:
-    audit_store = LocalKnowledgeBackend(workspace)
-    standard = OpenAICompatibleModel(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        audit_store=audit_store,
-        timeout=settings.http_timeout,
-        max_concurrency=settings.llm_request_concurrency,
-    )
-    strong = standard
-    if settings.llm_strong_model != settings.llm_model:
-        strong = OpenAICompatibleModel(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            model=settings.llm_strong_model,
-            audit_store=audit_store,
-            timeout=settings.http_timeout,
-            max_concurrency=settings.llm_request_concurrency,
-        )
-    compiler = None
-    if compile_pdf:
-        compiler = TectonicCompiler(
-            settings.tectonic_command,
-            timeout_seconds=settings.tectonic_timeout,
-        )
-    return ExamAgentWorkflow(
-        ModelRouter(standard=standard, strong=strong),
-        ArtifactStore(workspace),
-        RunStore(workspace),
-        max_parallel_questions=settings.exam_question_concurrency,
-        compiler=compiler,
-    )
-
-
-def _latest_artifact_json(
     artifacts: ArtifactStore,
-    run_id: UUID,
-    logical_name: str,
-) -> Any:
-    matches = [
-        artifact for artifact in artifacts.list(run_id) if artifact.logical_name == logical_name
-    ]
-    if not matches:
-        raise KeyError(f"artifact not found for run {run_id}: {logical_name}")
-    latest = max(matches, key=lambda artifact: artifact.version)
-    return json.loads(artifacts.read_bytes(latest.id))
+    artifact_id: UUID | None,
+) -> str:
+    if artifact_id is None:
+        return "-"
+    artifact = artifacts.get(artifact_id)
+    return str(workspace.root / artifact.path) if artifact is not None else "<missing>"
+
+
+def _echo_human_review(run_id: UUID, store: RunStore) -> None:
+    request = store.pending_human_review(run_id)
+    if request is None:
+        return
+    typer.echo(f"Review: {request.prompt}")
+    typer.echo(f"Approve: assessment-workbench runs approve {run_id}")
+    typer.echo(f"Retry: assessment-workbench runs retry {run_id}")
+    typer.echo(f"Continue after decision: assessment-workbench runs resume {run_id}")
+
+
+def _raise_if_interrupted(run_id: UUID, status: RunStatus, error: str | None) -> None:
+    if status is not RunStatus.INTERRUPTED:
+        return
+    typer.echo(f"Retryable interruption: {error or 'workflow interrupted'}", err=True)
+    typer.echo(f"Resume: assessment-workbench runs resume {run_id}", err=True)
+    raise typer.Exit(1)
+
+
+@app.command("gui")
+def launch_gui(
+    host: Annotated[
+        str, typer.Option(help="Host interface for the local GUI service")
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8765,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Open the GUI in the default browser"),
+    ] = True,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from assessment_workbench.web_api import create_gui_app
+
+    workspace = _workspace(workspace_path)
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        typer.echo(
+            "Warning: GUI is running without authentication on a non-loopback interface.",
+            err=True,
+        )
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{browser_host}:{port}"
+    if open_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    typer.echo(f"Assessment Workbench GUI: {url}")
+    typer.echo(f"Workspace: {workspace.root}")
+    uvicorn.run(create_gui_app(workspace, Settings()), host=host, port=port, log_level="info")
 
 
 @workspace_app.command("init")
@@ -334,6 +364,77 @@ def cancel_run(
     typer.echo(f"Status: {run.status}")
 
 
+@runs_app.command("resume")
+def resume_run(
+    run_id: UUID,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    store = RunStore(workspace)
+    run = store.get(run_id)
+    if run is None:
+        typer.echo(f"Run not found: {run_id}", err=True)
+        raise typer.Exit(1)
+    if run.status is RunStatus.WAITING_HUMAN:
+        typer.echo(f"Run is waiting for a human decision: {run_id}", err=True)
+        _echo_human_review(run_id, store)
+        raise typer.Exit(1)
+
+    workflow = build_exam_workflow(workspace, Settings(), compile_pdf=True)
+    try:
+        if run.workflow == "exam_agent_generation":
+            resumed, state = asyncio.run(workflow.resume(run_id))
+        elif run.workflow == "exam_question_generation":
+            resumed, state = asyncio.run(workflow.resume_question_run(run_id))
+        elif run.workflow == "exam_edited_assembly":
+            resumed, state = asyncio.run(
+                build_edited_exam_workflow(workspace, Settings()).resume(run_id)
+            )
+        else:
+            raise ValueError(f"workflow does not have a registered resume handler: {run.workflow}")
+    except (KeyError, OSError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Run: {resumed.id}")
+    typer.echo(f"Status: {resumed.status}")
+    if resumed.status is RunStatus.WAITING_HUMAN:
+        _echo_human_review(resumed.id, store)
+        return
+    _raise_if_interrupted(resumed.id, resumed.status, resumed.error)
+    if resumed.status is not RunStatus.SUCCEEDED:
+        typer.echo(f"Error: {resumed.error or 'workflow ended without success'}", err=True)
+        raise typer.Exit(1)
+    if resumed.workflow == "exam_question_generation":
+        request = QuestionGenerationRequest.model_validate(
+            latest_artifact_json(ArtifactStore(workspace), resumed.id, "question-request.json")
+        )
+        bundle = state.get("bundle")
+        bundle_artifact = state.get("bundle_artifact")
+        if (
+            request.parent_run_id is not None
+            and isinstance(bundle, ExamQuestionBundle)
+            and isinstance(bundle_artifact, ArtifactRef)
+        ):
+            editable_path = publish_question_bundle(
+                workspace,
+                parent_run_id=request.parent_run_id,
+                plan=request.plan,
+                child_run=resumed,
+                bundle=bundle,
+                bundle_artifact=bundle_artifact,
+            )
+            typer.echo(f"Editable: {workspace.root / editable_path}")
+    if resumed.workflow in {"exam_agent_generation", "exam_edited_assembly"}:
+        exam = state.get("exam")
+        if isinstance(exam, ExamDocument):
+            typer.echo(f"Questions: {len(exam.questions)}")
+            typer.echo(f"Total score: {exam.total_score}")
+        for artifact in state.get("artifacts", []):
+            if isinstance(artifact, ArtifactRef):
+                typer.echo(f"Artifact: {workspace.root / artifact.path}")
+
+
 def _resolve_human(
     run_id: UUID,
     decision_type: HumanDecisionType,
@@ -390,6 +491,27 @@ def retry_run(
     _resolve_human(run_id, HumanDecisionType.RETRY, actor, reason, workspace_path)
 
 
+@runs_app.command("retry-failed")
+def retry_failed_run(
+    run_id: UUID,
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    try:
+        run = RunStore(_workspace(workspace_path)).retry_failed(
+            run_id,
+            actor=actor,
+            reason=reason,
+        )
+    except (KeyError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Run: {run.id}")
+    typer.echo(f"Status: {run.status}")
+    typer.echo(f"Resume: assessment-workbench runs resume {run.id}")
+
+
 @runs_app.command("abort")
 def abort_run(
     run_id: UUID,
@@ -417,6 +539,13 @@ def generate_exam(
         Path | None,
         typer.Option("--blueprint", help="Optional locked exam blueprint YAML"),
     ] = None,
+    human_gates: Annotated[
+        bool,
+        typer.Option(
+            "--human-gates/--no-human-gates",
+            help="Pause for generated-blueprint and final-exam approval",
+        ),
+    ] = True,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     if source is not None and not source.is_file():
@@ -438,7 +567,7 @@ def generate_exam(
 
     workspace = _workspace(workspace_path)
     settings = Settings()
-    workflow = _exam_workflow(workspace, settings, compile_pdf=True)
+    workflow = build_exam_workflow(workspace, settings, compile_pdf=True)
     run, state = asyncio.run(
         workflow.execute(
             subject=subject,
@@ -447,10 +576,16 @@ def generate_exam(
             source_context=source.read_text(encoding="utf-8") if source else "",
             subject_profile=subject_profile,
             blueprint=blueprint,
+            require_blueprint_approval=human_gates and subject_profile is None,
+            require_exam_approval=human_gates,
             on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
         )
     )
     typer.echo(f"Status: {run.status}")
+    if run.status is RunStatus.WAITING_HUMAN:
+        _echo_human_review(run.id, RunStore(workspace))
+        return
+    _raise_if_interrupted(run.id, run.status, run.error)
     if run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {run.error or 'workflow ended without success'}", err=True)
         raise typer.Exit(1)
@@ -475,7 +610,7 @@ def show_exam_question_status(
         if live_path.is_file():
             records = json.loads(live_path.read_text(encoding="utf-8"))
         else:
-            records = _latest_artifact_json(
+            records = latest_artifact_json(
                 ArtifactStore(workspace), parent_run_id, "question-runs.json"
             )
     except (KeyError, OSError, ValueError) as exc:
@@ -501,7 +636,7 @@ def show_exam_question_status(
         editable = record.get("editable_path") or "-"
         if editable != "-":
             editable = str(workspace.root / str(editable))
-        error = str(record.get("error") or "").replace("\n", " ")
+        error = _console_safe(record.get("error") or "").replace("\n", " ")
         typer.echo(
             f"{record.get('question_number', '-')}\t{status}\t{child_id or '-'}\t"
             f"{editable}\t{error}"
@@ -510,10 +645,88 @@ def show_exam_question_status(
     typer.echo(f"Summary: {summary}")
 
 
+@exams_app.command("research-status")
+def show_exam_research_status(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    artifacts = ArtifactStore(workspace)
+    runs = RunStore(workspace)
+    live_path = workspace.root / "editable" / str(parent_run_id) / "subject-research-runs.json"
+    try:
+        payload = (
+            json.loads(live_path.read_text(encoding="utf-8"))
+            if live_path.is_file()
+            else latest_artifact_json(artifacts, parent_run_id, "subject-research-runs.json")
+        )
+        records = parse_subject_research_records(payload)
+    except (KeyError, OSError, ValueError) as exc:
+        raise typer.BadParameter(f"subject research manifest is unavailable: {exc}") from exc
+    typer.echo("ROLE\tSTATUS\tATTEMPT\tCHILD_RUN\tREPORT\tERROR")
+    for record in records:
+        child = runs.get(record.run_id)
+        status = child.status if child is not None else record.status
+        report = _artifact_display_path(workspace, artifacts, record.report_artifact_id)
+        error = _console_safe((child.error if child is not None else record.error) or "").replace(
+            "\n", " "
+        )
+        typer.echo(
+            f"{record.research_role}\t{status}\t{record.attempt}\t{record.run_id}\t"
+            f"{report}\t{error}"
+        )
+
+
+@exams_app.command("document-status")
+def show_exam_document_status(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    artifacts = ArtifactStore(workspace)
+    live_path = workspace.root / "editable" / str(parent_run_id) / "document-build-runs.json"
+    try:
+        if live_path.is_file():
+            payload = json.loads(live_path.read_text(encoding="utf-8"))
+        else:
+            payload = latest_artifact_json(artifacts, parent_run_id, "document-build-runs.json")
+        if not isinstance(payload, list):
+            raise ValueError("document build manifest is not a list")
+        records = [DocumentBuildRunRecord.model_validate(item) for item in payload]
+    except (KeyError, OSError, ValueError) as exc:
+        raise typer.BadParameter(f"document build manifest is unavailable: {exc}") from exc
+    latest = {record.view.value: record for record in latest_document_builds(records)}
+    typer.echo("VIEW\tSTATUS\tATTEMPT\tCHILD_RUN\tPDF\tINSPECTION\tERROR")
+    for view in ("questions", "solutions", "rubric"):
+        latest_record = latest.get(view)
+        if latest_record is None:
+            typer.echo(f"{view}\tqueued\t-\t-\t-\t-\t-")
+            continue
+        pdf = _artifact_display_path(workspace, artifacts, latest_record.pdf_artifact_id)
+        inspection = _artifact_display_path(
+            workspace,
+            artifacts,
+            latest_record.inspection_artifact_id,
+        )
+        error = _console_safe(latest_record.error or "").replace("\n", " ")
+        typer.echo(
+            f"{view}\t{latest_record.status}\t{latest_record.attempt}\t"
+            f"{latest_record.run_id}\t"
+            f"{pdf}\t{inspection}\t{error}"
+        )
+
+
 @exams_app.command("generate-question")
 def generate_exam_question(
     parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
     number: Annotated[int, typer.Option(min=1)],
+    feedback: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--feedback",
+            help="Writer feedback for this independent question rerun; repeat as needed",
+        ),
+    ] = None,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     workspace = _workspace(workspace_path)
@@ -523,14 +736,14 @@ def generate_exam_question(
     artifacts = ArtifactStore(workspace)
     try:
         profile = SubjectProfile.model_validate(
-            _latest_artifact_json(artifacts, parent_run_id, "subject-profile.json")
+            latest_artifact_json(artifacts, parent_run_id, "subject-profile.json")
         )
         blueprint = ExamBlueprint.model_validate(
-            _latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
+            latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
         )
         plans = [
             QuestionPlan.model_validate(item)
-            for item in _latest_artifact_json(artifacts, parent_run_id, "question-plans.json")
+            for item in latest_artifact_json(artifacts, parent_run_id, "question-plans.json")
         ]
     except (KeyError, ValueError) as exc:
         raise typer.BadParameter(f"parent run is missing valid planning artifacts: {exc}") from exc
@@ -538,17 +751,19 @@ def generate_exam_question(
     if plan is None:
         raise typer.BadParameter(f"question number is not present in the plan: {number}")
 
-    workflow = _exam_workflow(workspace, Settings(), compile_pdf=False)
+    workflow = build_exam_workflow(workspace, Settings(), compile_pdf=False)
     child_run, state = asyncio.run(
         workflow.generate_question_run(
             profile=profile,
             blueprint=blueprint,
             plan=plan,
             parent_run_id=parent_run_id,
+            generation_feedback=feedback or [],
             on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
         )
     )
     typer.echo(f"Status: {child_run.status}")
+    _raise_if_interrupted(child_run.id, child_run.status, child_run.error)
     if child_run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {child_run.error or 'question generation failed'}", err=True)
         raise typer.Exit(1)
@@ -557,57 +772,744 @@ def generate_exam_question(
     bundle_artifact = state.get("bundle_artifact")
     if not isinstance(bundle, ExamQuestionBundle) or not isinstance(bundle_artifact, ArtifactRef):
         raise RuntimeError("question child run completed without a bundle artifact")
-    editable_path = artifacts.write_editable_json(
-        parent_run_id,
-        f"questions/{number:02d}.json",
-        bundle.model_dump(mode="json"),
+    editable_path = publish_question_bundle(
+        workspace,
+        parent_run_id=parent_run_id,
+        plan=plan,
+        child_run=child_run,
+        bundle=bundle,
+        bundle_artifact=bundle_artifact,
     )
-    try:
-        records = _latest_artifact_json(artifacts, parent_run_id, "question-runs.json")
-    except KeyError:
-        records = []
-    if not isinstance(records, list):
-        raise RuntimeError("question-runs artifact is not a list")
-    records = [
-        record
-        for record in records
-        if not isinstance(record, dict) or record.get("question_number") != number
+    typer.echo(f"Editable: {workspace.root / editable_path}")
+
+
+@exams_app.command("set-plan-minutes")
+def set_exam_question_plan_minutes(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    number: Annotated[int, typer.Option(min=1)],
+    minutes: Annotated[int, typer.Option(min=1)],
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    if not actor.strip() or not reason.strip():
+        raise typer.BadParameter("plan minute override requires actor and reason")
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    run = runs.get(parent_run_id)
+    if run is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    if run.status is not RunStatus.WAITING_HUMAN:
+        raise typer.BadParameter("plan minute override requires a waiting_human parent run")
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise typer.BadParameter("parent run has no recovery checkpoint")
+    plans_artifact_id = checkpoint.artifact_bindings.get("question_plans")
+    blueprint_artifact_id = checkpoint.artifact_bindings.get("blueprint")
+    if plans_artifact_id is None or blueprint_artifact_id is None:
+        raise typer.BadParameter("parent checkpoint is missing plans or blueprint")
+    artifacts = ArtifactStore(workspace)
+    plans_payload = artifacts.read_json(plans_artifact_id)
+    if not isinstance(plans_payload, list):
+        raise typer.BadParameter("question plan artifact is not a list")
+    plans = [QuestionPlan.model_validate(item) for item in plans_payload]
+    current = next((plan for plan in plans if plan.number == number), None)
+    if current is None:
+        raise typer.BadParameter(f"question number is not present in the plan: {number}")
+    updated = [
+        plan.model_copy(update={"estimated_minutes": minutes}) if plan.number == number else plan
+        for plan in plans
     ]
-    records.append(
-        {
-            "question_number": number,
-            "plan_id": plan.id,
-            "run_id": str(child_run.id),
-            "status": child_run.status,
-            "error": child_run.error,
-            "bundle_artifact_id": str(bundle_artifact.id),
-            "bundle_path": str(bundle_artifact.path),
-            "editable_path": str(editable_path),
+    blueprint = ExamBlueprint.model_validate(artifacts.read_json(blueprint_artifact_id))
+    validate_question_plan_coverage(blueprint, updated)
+    validate_question_plan_timing(blueprint, updated)
+    updated_artifact = artifacts.write_json(
+        parent_run_id,
+        "question-plans.json",
+        [plan.model_dump(mode="json") for plan in updated],
+        created_by_phase="QUESTION_PLAN_HUMAN_OVERRIDE",
+    )
+    checkpoint.artifact_bindings["question_plans"] = updated_artifact.id
+    checkpoint.created_at = now_utc()
+    timestamp = checkpoint.created_at
+    runs.commit_checkpoint_override(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="QUESTION_PLAN_HUMAN_OVERRIDE",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1
+            + sum(event.phase == "QUESTION_PLAN_HUMAN_OVERRIDE" for event in runs.events(run.id)),
+            input_artifact_ids=[plans_artifact_id],
+            output_artifact_ids=[updated_artifact.id],
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "question_number": str(number),
+                "old_minutes": str(current.estimated_minutes),
+                "new_minutes": str(minutes),
+                "total_minutes": str(sum(plan.estimated_minutes for plan in updated)),
+            },
+        ),
+        checkpoint,
+        binding_key="question_plans",
+        expected_artifact_id=plans_artifact_id,
+    )
+    typer.echo(f"Question: {number}")
+    typer.echo(f"Minutes: {current.estimated_minutes} -> {minutes}")
+    typer.echo(f"Total minutes: {sum(plan.estimated_minutes for plan in updated)}")
+    typer.echo(f"Artifact: {workspace.root / updated_artifact.path}")
+
+
+@exams_app.command("set-title")
+def set_exam_title(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    title: Annotated[str, typer.Option("--title")],
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    if not title.strip() or not actor.strip() or not reason.strip():
+        raise typer.BadParameter("title revision requires title, actor, and reason")
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    run = runs.get(parent_run_id)
+    if run is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    if run.status is not RunStatus.WAITING_HUMAN:
+        raise typer.BadParameter("title revision requires a waiting_human parent run")
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise typer.BadParameter("parent run has no recovery checkpoint")
+    blueprint_artifact_id = checkpoint.artifact_bindings.get("blueprint")
+    if blueprint_artifact_id is None:
+        raise typer.BadParameter("parent checkpoint is missing the blueprint")
+    artifacts = ArtifactStore(workspace)
+    blueprint = ExamBlueprint.model_validate(artifacts.read_json(blueprint_artifact_id))
+    updated = blueprint.model_copy(update={"title": title.strip()})
+    updated_artifact = artifacts.write_json(
+        parent_run_id,
+        "exam-blueprint.json",
+        updated.model_dump(mode="json"),
+        created_by_phase="BLUEPRINT_HUMAN_OVERRIDE",
+    )
+    checkpoint.artifact_bindings["blueprint"] = updated_artifact.id
+    checkpoint.created_at = now_utc()
+    timestamp = checkpoint.created_at
+    runs.commit_checkpoint_override(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="BLUEPRINT_HUMAN_OVERRIDE",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1
+            + sum(event.phase == "BLUEPRINT_HUMAN_OVERRIDE" for event in runs.events(run.id)),
+            input_artifact_ids=[blueprint_artifact_id],
+            output_artifact_ids=[updated_artifact.id],
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "old_title": blueprint.title,
+                "new_title": updated.title,
+            },
+        ),
+        checkpoint,
+        binding_key="blueprint",
+        expected_artifact_id=blueprint_artifact_id,
+    )
+    typer.echo(f"Title: {blueprint.title} -> {updated.title}")
+    typer.echo(f"Artifact: {workspace.root / updated_artifact.path}")
+
+
+@exams_app.command("set-calculator-policy")
+def set_exam_calculator_policy(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    policy: Annotated[CalculatorPolicy, typer.Option("--policy")],
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    if not actor.strip() or not reason.strip():
+        raise typer.BadParameter("calculator policy revision requires actor and reason")
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    run = runs.get(parent_run_id)
+    if run is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    if run.status not in {RunStatus.WAITING_HUMAN, RunStatus.INTERRUPTED}:
+        raise typer.BadParameter(
+            "calculator policy revision requires a waiting_human or interrupted parent run"
+        )
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise typer.BadParameter("parent run has no recovery checkpoint")
+    blueprint_artifact_id = checkpoint.artifact_bindings.get("blueprint")
+    if blueprint_artifact_id is None:
+        raise typer.BadParameter("parent checkpoint is missing the blueprint")
+    artifacts = ArtifactStore(workspace)
+    blueprint = ExamBlueprint.model_validate(artifacts.read_json(blueprint_artifact_id))
+    retained_constraints = [
+        constraint
+        for constraint in blueprint.constraints
+        if "计算器" not in constraint and "calculator" not in constraint.lower()
+    ]
+    policy_constraint = {
+        CalculatorPolicy.UNSPECIFIED: "计算器及其他计算辅助工具政策尚未锁定，需在命题前人工确认。",
+        CalculatorPolicy.PROHIBITED: (
+            "闭卷考试不允许使用计算器；除题目明确要求外，数值结果保留精确形式。"
+        ),
+        CalculatorPolicy.SCIENTIFIC_ALLOWED: (
+            "允许使用不具备编程、符号代数或联网功能的普通科学计算器。"
+        ),
+    }[policy]
+    updated = blueprint.model_copy(
+        update={
+            "calculator_policy": policy,
+            "constraints": [policy_constraint, *retained_constraints],
         }
     )
-    records.sort(
-        key=lambda record: int(record.get("question_number", 0)) if isinstance(record, dict) else 0
+    updated_artifact = artifacts.write_json(
+        parent_run_id,
+        "exam-blueprint.json",
+        updated.model_dump(mode="json"),
+        created_by_phase="BLUEPRINT_HUMAN_OVERRIDE",
     )
-    artifacts.write_editable_json(parent_run_id, "question-runs.json", records)
-    artifacts.write_json(
+    checkpoint.artifact_bindings["blueprint"] = updated_artifact.id
+    checkpoint.created_at = now_utc()
+    timestamp = checkpoint.created_at
+    runs.commit_checkpoint_override(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="BLUEPRINT_HUMAN_OVERRIDE",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1
+            + sum(event.phase == "BLUEPRINT_HUMAN_OVERRIDE" for event in runs.events(run.id)),
+            input_artifact_ids=[blueprint_artifact_id],
+            output_artifact_ids=[updated_artifact.id],
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "old_calculator_policy": blueprint.calculator_policy.value,
+                "new_calculator_policy": updated.calculator_policy.value,
+            },
+        ),
+        checkpoint,
+        binding_key="blueprint",
+        expected_artifact_id=blueprint_artifact_id,
+    )
+    typer.echo(
+        f"Calculator policy: {blueprint.calculator_policy.value} -> "
+        f"{updated.calculator_policy.value}"
+    )
+    typer.echo(f"Artifact: {workspace.root / updated_artifact.path}")
+
+
+@exams_app.command("set-difficulty-basis")
+def set_exam_difficulty_basis(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    basis: Annotated[DifficultyBasis, typer.Option("--basis")],
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    if not actor.strip() or not reason.strip():
+        raise typer.BadParameter("difficulty basis revision requires actor and reason")
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    run = runs.get(parent_run_id)
+    if run is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    if run.status not in {RunStatus.WAITING_HUMAN, RunStatus.INTERRUPTED}:
+        raise typer.BadParameter(
+            "difficulty basis revision requires a waiting_human or interrupted parent run"
+        )
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise typer.BadParameter("parent run has no recovery checkpoint")
+    blueprint_artifact_id = checkpoint.artifact_bindings.get("blueprint")
+    if blueprint_artifact_id is None:
+        raise typer.BadParameter("parent checkpoint is missing the blueprint")
+    artifacts = ArtifactStore(workspace)
+    blueprint = ExamBlueprint.model_validate(artifacts.read_json(blueprint_artifact_id))
+    retained_constraints = [
+        constraint for constraint in blueprint.constraints if "难度比例" not in constraint
+    ]
+    basis_constraint = {
+        DifficultyBasis.UNSPECIFIED: "难度比例的统计口径尚未锁定，需在命题前人工确认。",
+        DifficultyBasis.QUESTION_COUNT: (
+            "难度比例按题数统计；18题下采用易6题、中9题、难3题，作为30%/50%/20%的最近整数分配。"
+        ),
+        DifficultyBasis.SCORE: "难度比例按题目分值统计。",
+        DifficultyBasis.ESTIMATED_TIME: "难度比例按预计作答时间统计。",
+    }[basis]
+    updated = blueprint.model_copy(
+        update={
+            "difficulty_basis": basis,
+            "constraints": [basis_constraint, *retained_constraints],
+        }
+    )
+    updated_artifact = artifacts.write_json(
+        parent_run_id,
+        "exam-blueprint.json",
+        updated.model_dump(mode="json"),
+        created_by_phase="BLUEPRINT_HUMAN_OVERRIDE",
+    )
+    checkpoint.artifact_bindings["blueprint"] = updated_artifact.id
+    checkpoint.created_at = now_utc()
+    timestamp = checkpoint.created_at
+    runs.commit_checkpoint_override(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="BLUEPRINT_HUMAN_OVERRIDE",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1
+            + sum(event.phase == "BLUEPRINT_HUMAN_OVERRIDE" for event in runs.events(run.id)),
+            input_artifact_ids=[blueprint_artifact_id],
+            output_artifact_ids=[updated_artifact.id],
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "old_difficulty_basis": blueprint.difficulty_basis.value,
+                "new_difficulty_basis": updated.difficulty_basis.value,
+            },
+        ),
+        checkpoint,
+        binding_key="blueprint",
+        expected_artifact_id=blueprint_artifact_id,
+    )
+    typer.echo(
+        f"Difficulty basis: {blueprint.difficulty_basis.value} -> {updated.difficulty_basis.value}"
+    )
+    typer.echo(f"Artifact: {workspace.root / updated_artifact.path}")
+
+
+@exams_app.command("revise-plan")
+def revise_exam_question_plan(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    number: Annotated[int, typer.Option(min=1)],
+    topic_tags: Annotated[list[str] | None, typer.Option("--topic-tag")] = None,
+    primary_skill: Annotated[str | None, typer.Option("--primary-skill")] = None,
+    design_brief: Annotated[str | None, typer.Option("--design-brief")] = None,
+    answer_form: Annotated[str | None, typer.Option("--answer-form")] = None,
+    solution_outline: Annotated[list[str] | None, typer.Option("--solution-outline")] = None,
+    rubric_focus: Annotated[list[str] | None, typer.Option("--rubric-focus")] = None,
+    verification_methods: Annotated[list[str] | None, typer.Option("--verification-method")] = None,
+    originality_constraints: Annotated[
+        list[str] | None, typer.Option("--originality-constraint")
+    ] = None,
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    if not actor.strip() or not reason.strip():
+        raise typer.BadParameter("plan revision requires actor and reason")
+    updates = {
+        key: value
+        for key, value in {
+            "topic_tags": topic_tags,
+            "primary_skill": primary_skill,
+            "design_brief": design_brief,
+            "answer_form": answer_form,
+            "solution_outline": solution_outline,
+            "rubric_focus": rubric_focus,
+            "verification_methods": verification_methods,
+            "originality_constraints": originality_constraints,
+        }.items()
+        if value is not None
+    }
+    if not updates:
+        raise typer.BadParameter("plan revision requires at least one changed field")
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    run = runs.get(parent_run_id)
+    if run is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    if run.status is not RunStatus.WAITING_HUMAN:
+        raise typer.BadParameter("plan revision requires a waiting_human parent run")
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise typer.BadParameter("parent run has no recovery checkpoint")
+    plans_artifact_id = checkpoint.artifact_bindings.get("question_plans")
+    blueprint_artifact_id = checkpoint.artifact_bindings.get("blueprint")
+    if plans_artifact_id is None or blueprint_artifact_id is None:
+        raise typer.BadParameter("parent checkpoint is missing plans or blueprint")
+    artifacts = ArtifactStore(workspace)
+    plans_payload = artifacts.read_json(plans_artifact_id)
+    if not isinstance(plans_payload, list):
+        raise typer.BadParameter("question plan artifact is not a list")
+    plans = [QuestionPlan.model_validate(item) for item in plans_payload]
+    current = next((plan for plan in plans if plan.number == number), None)
+    if current is None:
+        raise typer.BadParameter(f"question number is not present in the plan: {number}")
+    updated = [
+        QuestionPlan.model_validate({**plan.model_dump(mode="python"), **updates})
+        if plan.number == number
+        else plan
+        for plan in plans
+    ]
+    blueprint = ExamBlueprint.model_validate(artifacts.read_json(blueprint_artifact_id))
+    validate_question_plan_coverage(blueprint, updated)
+    validate_question_plan_timing(blueprint, updated)
+    updated_artifact = artifacts.write_json(
+        parent_run_id,
+        "question-plans.json",
+        [plan.model_dump(mode="json") for plan in updated],
+        created_by_phase="QUESTION_PLAN_HUMAN_OVERRIDE",
+    )
+    checkpoint.artifact_bindings["question_plans"] = updated_artifact.id
+    checkpoint.created_at = now_utc()
+    timestamp = checkpoint.created_at
+    runs.commit_checkpoint_override(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="QUESTION_PLAN_HUMAN_OVERRIDE",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1
+            + sum(event.phase == "QUESTION_PLAN_HUMAN_OVERRIDE" for event in runs.events(run.id)),
+            input_artifact_ids=[plans_artifact_id],
+            output_artifact_ids=[updated_artifact.id],
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "question_number": str(number),
+                "changed_fields": ",".join(sorted(updates)),
+            },
+        ),
+        checkpoint,
+        binding_key="question_plans",
+        expected_artifact_id=plans_artifact_id,
+    )
+    typer.echo(f"Question: {number}")
+    typer.echo(f"Changed fields: {', '.join(sorted(updates))}")
+    typer.echo(f"Artifact: {workspace.root / updated_artifact.path}")
+
+
+@exams_app.command("restore-plan-version")
+def restore_exam_question_plan_version(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    version: Annotated[int, typer.Option(min=1)],
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    if not actor.strip() or not reason.strip():
+        raise typer.BadParameter("plan rollback requires actor and reason")
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    run = runs.get(parent_run_id)
+    if run is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    if run.status is not RunStatus.WAITING_HUMAN:
+        raise typer.BadParameter("plan rollback requires a waiting_human parent run")
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise typer.BadParameter("parent run has no recovery checkpoint")
+    current_artifact_id = checkpoint.artifact_bindings.get("question_plans")
+    blueprint_artifact_id = checkpoint.artifact_bindings.get("blueprint")
+    if current_artifact_id is None or blueprint_artifact_id is None:
+        raise typer.BadParameter("parent checkpoint is missing plans or blueprint")
+    artifacts = ArtifactStore(workspace)
+    selected = next(
+        (
+            artifact
+            for artifact in artifacts.list(parent_run_id)
+            if artifact.logical_name == "question-plans.json" and artifact.version == version
+        ),
+        None,
+    )
+    if selected is None:
+        raise typer.BadParameter(f"question plan artifact version does not exist: {version}")
+    payload = artifacts.read_json(selected.id)
+    if not isinstance(payload, list):
+        raise typer.BadParameter("selected question plan artifact is not a list")
+    plans = [QuestionPlan.model_validate(item) for item in payload]
+    blueprint = ExamBlueprint.model_validate(artifacts.read_json(blueprint_artifact_id))
+    validate_question_plan_coverage(blueprint, plans)
+    validate_question_plan_timing(blueprint, plans)
+    checkpoint.artifact_bindings["question_plans"] = selected.id
+    checkpoint.created_at = now_utc()
+    timestamp = checkpoint.created_at
+    runs.commit_checkpoint_override(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="QUESTION_PLAN_ROLLBACK",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1 + sum(event.phase == "QUESTION_PLAN_ROLLBACK" for event in runs.events(run.id)),
+            input_artifact_ids=[current_artifact_id],
+            output_artifact_ids=[selected.id],
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "restored_version": str(version),
+            },
+        ),
+        checkpoint,
+        binding_key="question_plans",
+        expected_artifact_id=current_artifact_id,
+    )
+    typer.echo(f"Restored version: {version}")
+    typer.echo(f"Artifact: {workspace.root / selected.path}")
+
+
+@exams_app.command("publish-question-run")
+def publish_exam_question_run(
+    child_run_id: Annotated[UUID, typer.Option("--child-run")],
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    child_run = runs.get(child_run_id)
+    if child_run is None:
+        raise typer.BadParameter(f"question child run does not exist: {child_run_id}")
+    if (
+        child_run.workflow != "exam_question_generation"
+        or child_run.status is not RunStatus.SUCCEEDED
+    ):
+        raise typer.BadParameter("question child run must be a succeeded exam_question_generation")
+    artifacts = ArtifactStore(workspace)
+    try:
+        request = QuestionGenerationRequest.model_validate(
+            latest_artifact_json(artifacts, child_run.id, "question-request.json")
+        )
+        bundle = ExamQuestionBundle.model_validate(
+            latest_artifact_json(artifacts, child_run.id, "question-bundle.json")
+        )
+        bundle_artifact = artifacts.latest(child_run.id, "question-bundle.json")
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(f"question child artifacts are invalid: {exc}") from exc
+    if request.parent_run_id is None or bundle_artifact is None:
+        raise typer.BadParameter("question child run has no parent or bundle artifact")
+    editable_path = publish_question_bundle(
+        workspace,
+        parent_run_id=request.parent_run_id,
+        plan=request.plan,
+        child_run=child_run,
+        bundle=bundle,
+        bundle_artifact=bundle_artifact,
+    )
+    typer.echo(f"Parent run: {request.parent_run_id}")
+    typer.echo(f"Editable: {workspace.root / editable_path}")
+
+
+@exams_app.command("accept-edited-questions")
+def accept_edited_exam_questions(
+    parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    actor: Annotated[str, typer.Option()] = "cli-user",
+    reason: Annotated[str, typer.Option()] = "",
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    if not actor.strip() or not reason.strip():
+        raise typer.BadParameter("accepting edited questions requires actor and reason")
+    workspace = _workspace(workspace_path)
+    runs = RunStore(workspace)
+    run = runs.get(parent_run_id)
+    if run is None:
+        raise typer.BadParameter(f"parent run does not exist: {parent_run_id}")
+    accepting_interrupted_questions = (
+        run.status is RunStatus.INTERRUPTED and run.current_phase == "QUESTIONS_GENERATING"
+    )
+    if run.status is not RunStatus.WAITING_HUMAN and not accepting_interrupted_questions:
+        raise typer.BadParameter(
+            "accepting edited questions requires a waiting_human parent run or an "
+            "interrupted QUESTIONS_GENERATING parent run"
+        )
+    review_request = (
+        runs.pending_human_review(parent_run_id) if run.status is RunStatus.WAITING_HUMAN else None
+    )
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise typer.BadParameter("parent run has no recovery checkpoint")
+    if run.status is RunStatus.WAITING_HUMAN and review_request is None:
+        raise typer.BadParameter("parent run has no pending review")
+    plans_artifact_id = checkpoint.artifact_bindings.get("question_plans")
+    blueprint_artifact_id = checkpoint.artifact_bindings.get("blueprint")
+    previous_runs_artifact_id = checkpoint.artifact_bindings.get("question_runs")
+    if (
+        plans_artifact_id is None
+        or blueprint_artifact_id is None
+        or previous_runs_artifact_id is None
+    ):
+        raise typer.BadParameter("parent checkpoint is missing plans, blueprint, or question runs")
+    artifacts = ArtifactStore(workspace)
+    plans_payload = artifacts.read_json(plans_artifact_id)
+    if not isinstance(plans_payload, list):
+        raise typer.BadParameter("question plan artifact is not a list")
+    plans = [QuestionPlan.model_validate(item) for item in plans_payload]
+    blueprint = ExamBlueprint.model_validate(artifacts.read_json(blueprint_artifact_id))
+    validate_question_plan_coverage(blueprint, plans)
+    validate_question_plan_timing(blueprint, plans)
+    plan_by_number = {plan.number: plan for plan in plans}
+    question_dir = workspace.root / "editable" / str(parent_run_id) / "questions"
+    expected_numbers = list(range(1, sum(section.count for section in blueprint.sections) + 1))
+    bundles: list[ExamQuestionBundle] = []
+    for number in expected_numbers:
+        path = question_dir / f"{number:02d}.json"
+        if not path.is_file():
+            raise typer.BadParameter(f"editable question is missing: {path.name}")
+        bundle = ExamQuestionBundle.model_validate_json(path.read_text(encoding="utf-8"))
+        validate_bundle_for_plan(bundle, plan_by_number[number])
+        bundles.append(bundle)
+
+    existing_payload = artifacts.read_json(previous_runs_artifact_id)
+    if not isinstance(existing_payload, list):
+        raise typer.BadParameter("question run artifact is not a list")
+    existing_by_number = {
+        int(record["question_number"]): record
+        for record in existing_payload
+        if isinstance(record, dict) and "question_number" in record
+    }
+    bundle_artifacts: list[ArtifactRef] = []
+    records: list[dict[str, Any]] = []
+    for bundle in bundles:
+        number = bundle.question.number
+        bundle_artifact = artifacts.write_json(
+            parent_run_id,
+            f"edited-question-{number:02d}-bundle.json",
+            bundle.model_dump(mode="json"),
+            created_by_phase="EDITED_QUESTIONS_ACCEPTED",
+        )
+        bundle_artifacts.append(bundle_artifact)
+        existing = existing_by_number.get(number, {})
+        records.append(
+            {
+                **existing,
+                "question_number": number,
+                "plan_id": plan_by_number[number].id,
+                "status": RunStatus.SUCCEEDED,
+                "error": None,
+                "bundle_artifact_id": str(bundle_artifact.id),
+                "bundle_path": str(bundle_artifact.path),
+                "editable_path": str(
+                    Path("editable") / str(parent_run_id) / "questions" / f"{number:02d}.json"
+                ),
+                "requires_human_review": False,
+            }
+        )
+    bundles_artifact = artifacts.write_json(
+        parent_run_id,
+        "question-bundles.json",
+        [bundle.model_dump(mode="json") for bundle in bundles],
+        created_by_phase="EDITED_QUESTIONS_ACCEPTED",
+    )
+    runs_artifact = artifacts.write_json(
         parent_run_id,
         "question-runs.json",
         records,
-        created_by_phase="QUESTION_REGENERATING",
+        created_by_phase="EDITED_QUESTIONS_ACCEPTED",
     )
-    typer.echo(f"Editable: {workspace.root / editable_path}")
+    artifacts.write_editable_json(parent_run_id, "question-runs.json", records)
+
+    resolved = run
+    if review_request is not None:
+        resolved = runs.resolve_human_review(
+            HumanDecision(
+                request_id=review_request.id,
+                run_id=parent_run_id,
+                decision=HumanDecisionType.EDIT_ACCEPT,
+                actor=actor.strip(),
+                reason=reason.strip(),
+                input_artifact_ids=[
+                    *review_request.artifact_ids,
+                    plans_artifact_id,
+                    *[artifact.id for artifact in bundle_artifacts],
+                ],
+            )
+        )
+    checkpoint = runs.get_checkpoint(parent_run_id)
+    if checkpoint is None:
+        raise RuntimeError("parent checkpoint disappeared after edit acceptance")
+    current_runs_artifact_id = checkpoint.artifact_bindings.get("question_runs")
+    if current_runs_artifact_id is None:
+        raise RuntimeError("parent checkpoint lost its question run binding")
+    checkpoint.artifact_bindings["question_runs"] = runs_artifact.id
+    checkpoint.artifact_bindings["bundles"] = bundles_artifact.id
+    for key in (
+        "exam",
+        "exam_review_manifest",
+        "exam_reviews",
+        "exam_decision",
+        "exam_workflow_state",
+        "document_manifest",
+        "document_acceptance",
+        "release_bundle",
+    ):
+        checkpoint.artifact_bindings.pop(key, None)
+    checkpoint.next_step_index = 7
+    checkpoint.created_at = now_utc()
+    timestamp = checkpoint.created_at
+    runs.commit_checkpoint_override(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="EDITED_QUESTIONS_ACCEPTED",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1
+            + sum(event.phase == "EDITED_QUESTIONS_ACCEPTED" for event in runs.events(run.id)),
+            input_artifact_ids=[previous_runs_artifact_id, plans_artifact_id],
+            output_artifact_ids=[
+                runs_artifact.id,
+                bundles_artifact.id,
+                *[artifact.id for artifact in bundle_artifacts],
+            ],
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "question_count": str(len(bundles)),
+                "resume_phase": "EXAM_ASSEMBLING",
+            },
+        ),
+        checkpoint,
+        binding_key="question_runs",
+        expected_artifact_id=current_runs_artifact_id,
+    )
+    typer.echo(f"Run: {resolved.id}")
+    typer.echo(f"Status: {resolved.status}")
+    typer.echo(f"Questions accepted: {len(bundles)}")
+    typer.echo("Resume phase: EXAM_ASSEMBLING")
 
 
 @exams_app.command("assemble-edited")
 def assemble_edited_exam(
     parent_run_id: Annotated[UUID, typer.Option("--parent-run")],
+    human_gates: Annotated[
+        bool,
+        typer.Option(
+            "--human-gates/--no-human-gates",
+            help="Pause for full-page visual approval before publishing",
+        ),
+    ] = False,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     workspace = _workspace(workspace_path)
     artifacts = ArtifactStore(workspace)
     try:
         blueprint = ExamBlueprint.model_validate(
-            _latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
+            latest_artifact_json(artifacts, parent_run_id, "exam-blueprint.json")
         )
     except (KeyError, ValueError) as exc:
         raise typer.BadParameter(f"parent run has no valid blueprint: {exc}") from exc
@@ -630,74 +1532,25 @@ def assemble_edited_exam(
             duration_minutes=blueprint.duration_minutes,
             total_score=blueprint.total_score,
             language=blueprint.language,
+            calculator_policy=blueprint.calculator_policy,
             questions=bundles,
         )
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"editable question validation failed: {exc}") from exc
 
-    async def assemble_step(state: dict[str, Any]) -> dict[str, Any]:
-        run_id = state["run_id"]
-        outputs = [
-            artifacts.write_json(
-                run_id,
-                "exam.json",
-                exam.model_dump(mode="json"),
-                created_by_phase="EDITED_EXAM_ASSEMBLING",
-            )
-        ]
-        settings = Settings()
-        compiler = TectonicCompiler(
-            settings.tectonic_command,
-            timeout_seconds=settings.tectonic_timeout,
-        )
-        latex_service = ExamLatexService(compiler=compiler)
-        for document in latex_service.build(exam):
-            view = document.view
-            source = document.source
-            outputs.append(
-                artifacts.write_bytes(
-                    run_id,
-                    f"exam-{view.value}.tex",
-                    source.encode("utf-8"),
-                    media_type="application/x-tex",
-                    created_by_phase="EDITED_LATEX_FORMATTING",
-                )
-            )
-            assert document.compile_result is not None
-            result = document.compile_result
-            outputs.append(
-                artifacts.write_bytes(
-                    run_id,
-                    f"exam-{view.value}.pdf",
-                    result.pdf,
-                    media_type="application/pdf",
-                    created_by_phase="EDITED_PDF_COMPILING",
-                )
-            )
-            outputs.append(
-                artifacts.write_bytes(
-                    run_id,
-                    f"exam-{view.value}.tectonic.log",
-                    result.log.encode("utf-8"),
-                    media_type="text/plain",
-                    created_by_phase="EDITED_PDF_COMPILING",
-                )
-            )
-        return {
-            "exam": exam,
-            "artifacts": outputs,
-            "output_artifact_ids": [artifact.id for artifact in outputs],
-        }
-
     assembly_run, state = asyncio.run(
-        WorkflowEngine(RunStore(workspace)).execute(
-            "exam_edited_assembly",
-            [("EDITED_EXAM_ASSEMBLING", assemble_step)],
-            parent_run_id=parent_run_id,
+        build_edited_exam_workflow(workspace, Settings()).execute(
+            exam,
+            source_parent_run_id=parent_run_id,
+            require_document_approval=human_gates,
             on_run_created=lambda created: typer.echo(f"Run: {created.id}"),
         )
     )
     typer.echo(f"Status: {assembly_run.status}")
+    if assembly_run.status is RunStatus.WAITING_HUMAN:
+        _echo_human_review(assembly_run.id, RunStore(workspace))
+        return
+    _raise_if_interrupted(assembly_run.id, assembly_run.status, assembly_run.error)
     if assembly_run.status is not RunStatus.SUCCEEDED:
         typer.echo(f"Error: {assembly_run.error or 'edited assembly failed'}", err=True)
         raise typer.Exit(1)

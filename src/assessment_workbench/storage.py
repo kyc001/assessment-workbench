@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import os
@@ -7,8 +8,9 @@ import re
 import socket
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from assessment_workbench.domain import (
     ArtifactRef,
@@ -22,6 +24,7 @@ from assessment_workbench.domain import (
     ModelCall,
     ParsedDocument,
     PhaseEvent,
+    PhaseStatus,
     RetrievalHit,
     RunStatus,
     WorkflowCheckpoint,
@@ -29,6 +32,10 @@ from assessment_workbench.domain import (
     now_utc,
     validate_run_transition,
 )
+from assessment_workbench.errors import is_retryable_failure
+
+_EDITABLE_REPLACE_ATTEMPTS = 7
+_EDITABLE_REPLACE_BASE_DELAY_SECONDS = 0.01
 
 
 class Workspace:
@@ -126,6 +133,96 @@ class RunStore:
         self.save(run)
         return run
 
+    def retry_failed(self, run_id: UUID, *, actor: str, reason: str) -> WorkflowRun:
+        if not actor.strip():
+            raise ValueError("failed run retry requires an actor")
+        if not reason.strip():
+            raise ValueError("failed run retry requires a reason")
+        run = self.get(run_id)
+        if run is None:
+            raise KeyError(f"run not found: {run_id}")
+        if run.status is not RunStatus.FAILED:
+            raise ValueError(f"run is not failed: {run.status}")
+        checkpoint = self.get_checkpoint(run_id)
+        if checkpoint is None:
+            raise ValueError(f"failed run has no recovery checkpoint: {run_id}")
+        failed_events = [
+            event for event in self.events(run_id) if event.status is PhaseStatus.FAILED
+        ]
+        if not failed_events:
+            raise ValueError(f"failed run has no failed phase event: {run_id}")
+        failed = failed_events[-1]
+        retryable_child_run_ids: list[UUID] = []
+        retryable = is_retryable_failure(failed.error_code, failed.error)
+        recovery_kind = "transient_failure" if retryable else ""
+        if not retryable and _is_subject_synthesis_validation_recoverable(failed, checkpoint):
+            retryable = True
+            recovery_kind = "subject_synthesis_validation"
+        if not retryable and _is_editable_projection_replace_recoverable(failed, checkpoint):
+            retryable = True
+            recovery_kind = "editable_projection_replace"
+        if not retryable and failed.phase == "QUESTIONS_GENERATING":
+            child_runs = [
+                child
+                for child_id in self.child_run_ids(run.id)
+                if (child := self.get(child_id)) is not None
+            ]
+            retryable_child_run_ids = [
+                child.id
+                for child in child_runs
+                if child.status in {RunStatus.FAILED, RunStatus.INTERRUPTED}
+                and self._run_has_retryable_failure(child.id)
+            ]
+            nonrecoverable_children = [
+                child
+                for child in child_runs
+                if child.status is not RunStatus.SUCCEEDED
+                and child.id not in retryable_child_run_ids
+            ]
+            retryable = bool(retryable_child_run_ids) and not nonrecoverable_children
+            if retryable:
+                recovery_kind = "retryable_question_children"
+        if not retryable:
+            raise ValueError(f"failed run error is not retryable: {failed.error_code or 'unknown'}")
+        validate_run_transition(run.status, RunStatus.INTERRUPTED)
+        timestamp = now_utc()
+        recovery_event = PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="RUN_RECOVERY",
+            status=PhaseStatus.COMPLETED,
+            occurrence_id=uuid4(),
+            round=1 + sum(event.phase == "RUN_RECOVERY" for event in self.events(run.id)),
+            started_at=timestamp,
+            completed_at=timestamp,
+            summary=reason.strip(),
+            error_details={
+                "actor": actor.strip(),
+                "failed_phase": failed.phase,
+                "failed_error_code": failed.error_code or "unknown",
+                "failed_error": failed.error or "",
+                "recovery_kind": recovery_kind,
+                "retryable_child_run_ids": ",".join(
+                    str(child_run_id) for child_run_id in retryable_child_run_ids
+                ),
+            },
+        )
+        run.status = RunStatus.INTERRUPTED
+        run.error = f"retry requested by {actor.strip()}: {reason.strip()}"
+        run.runner_host = None
+        run.runner_pid = None
+        run.updated_at = timestamp
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_phase_event(connection, recovery_event)
+            connection.execute(
+                """UPDATE runs SET status=?, updated_at=?, error=?, runner_host=NULL,
+                runner_pid=NULL WHERE id=?""",
+                (run.status, run.updated_at.isoformat(), run.error, str(run.id)),
+            )
+            connection.commit()
+        return run
+
     def recover_orphaned(self, *, host: str | None = None) -> list[WorkflowRun]:
         current_host = host or socket.gethostname()
         recovered: list[WorkflowRun] = []
@@ -143,18 +240,45 @@ class RunStore:
 
     def save_checkpoint(self, checkpoint: WorkflowCheckpoint) -> None:
         with self.workspace.connect() as connection:
-            connection.execute(
-                """INSERT OR REPLACE INTO workflow_checkpoints
-                (run_id, workflow, next_step_index, created_at, payload)
-                VALUES (?, ?, ?, ?, ?)""",
-                (
-                    str(checkpoint.run_id),
-                    checkpoint.workflow,
-                    checkpoint.next_step_index,
-                    checkpoint.created_at.isoformat(),
-                    checkpoint.model_dump_json(),
-                ),
-            )
+            self._upsert_checkpoint(connection, checkpoint)
+
+    def commit_phase(self, event: PhaseEvent, checkpoint: WorkflowCheckpoint) -> None:
+        if event.status is not PhaseStatus.COMPLETED:
+            raise ValueError("only completed phase events can be committed with a checkpoint")
+        if event.run_id != checkpoint.run_id or event.workflow != checkpoint.workflow:
+            raise ValueError("phase event and checkpoint must belong to the same workflow run")
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_phase_event(connection, event)
+            self._upsert_checkpoint(connection, checkpoint)
+            connection.commit()
+
+    def commit_checkpoint_override(
+        self,
+        event: PhaseEvent,
+        checkpoint: WorkflowCheckpoint,
+        *,
+        binding_key: str,
+        expected_artifact_id: UUID,
+    ) -> None:
+        if event.status is not PhaseStatus.COMPLETED:
+            raise ValueError("checkpoint override requires a completed phase event")
+        if event.run_id != checkpoint.run_id or event.workflow != checkpoint.workflow:
+            raise ValueError("phase event and checkpoint must belong to the same workflow run")
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM workflow_checkpoints WHERE run_id=?",
+                (str(checkpoint.run_id),),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"run has no checkpoint: {checkpoint.run_id}")
+            current = WorkflowCheckpoint.model_validate_json(row["payload"])
+            if current.artifact_bindings.get(binding_key) != expected_artifact_id:
+                raise ValueError(f"checkpoint binding changed during override: {binding_key}")
+            self._insert_phase_event(connection, event)
+            self._upsert_checkpoint(connection, checkpoint)
+            connection.commit()
 
     def get_checkpoint(self, run_id: UUID) -> WorkflowCheckpoint | None:
         with self.workspace.connect() as connection:
@@ -201,6 +325,20 @@ class RunStore:
             raise KeyError(f"run not found: {decision.run_id}")
         if run.status is not RunStatus.WAITING_HUMAN:
             raise ValueError(f"run is not waiting for human review: {run.status}")
+        if decision.decision not in request.allowed_decisions:
+            raise ValueError(
+                f"human decision {decision.decision.value!r} is not allowed for phase "
+                f"{request.phase!r}"
+            )
+        checkpoint: WorkflowCheckpoint | None = None
+        if decision.decision in {
+            HumanDecisionType.ACCEPT,
+            HumanDecisionType.EDIT_ACCEPT,
+            HumanDecisionType.RETRY,
+        }:
+            checkpoint = self.get_checkpoint(decision.run_id)
+            if checkpoint is None:
+                raise ValueError(f"run has no checkpoint for human decision: {decision.run_id}")
         request.resolved_at = now_utc()
         with self.workspace.connect() as connection:
             connection.execute(
@@ -226,6 +364,19 @@ class RunStore:
             HumanDecisionType.EDIT_ACCEPT,
             HumanDecisionType.RETRY,
         }:
+            assert checkpoint is not None
+            legacy_request = request.resume_step_index == request.retry_step_index == 0
+            if decision.decision is HumanDecisionType.RETRY:
+                checkpoint.next_step_index = (
+                    max(0, checkpoint.next_step_index - 1)
+                    if legacy_request
+                    else request.retry_step_index
+                )
+            elif not legacy_request:
+                checkpoint.next_step_index = request.resume_step_index
+            checkpoint.human_decision_id = decision.id
+            checkpoint.created_at = now_utc()
+            self.save_checkpoint(checkpoint)
             return self.transition(run, RunStatus.INTERRUPTED)
         if decision.decision is HumanDecisionType.REJECT:
             return self.transition(run, RunStatus.FAILED, error=decision.reason or "human rejected")
@@ -233,36 +384,58 @@ class RunStore:
 
     def append_event(self, event: PhaseEvent) -> None:
         with self.workspace.connect() as connection:
-            connection.execute(
-                """INSERT INTO phase_events
-                (id, run_id, workflow, phase, status, occurrence_id, round,
-                 parent_run_id, parent_event_id, entity_type, entity_id,
-                 input_artifact_ids, output_artifact_ids, started_at, completed_at,
-                 summary, warnings, error_code, error_details, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(event.id),
-                    str(event.run_id),
-                    event.workflow,
-                    event.phase,
-                    event.status,
-                    str(event.occurrence_id),
-                    event.round,
-                    str(event.parent_run_id) if event.parent_run_id else None,
-                    str(event.parent_event_id) if event.parent_event_id else None,
-                    event.entity_type,
-                    event.entity_id,
-                    json.dumps([str(value) for value in event.input_artifact_ids]),
-                    json.dumps([str(value) for value in event.output_artifact_ids]),
-                    event.started_at.isoformat(),
-                    event.completed_at.isoformat() if event.completed_at else None,
-                    event.summary,
-                    json.dumps(event.warnings, ensure_ascii=False),
-                    event.error_code,
-                    json.dumps(event.error_details, ensure_ascii=False),
-                    event.error,
-                ),
-            )
+            self._insert_phase_event(connection, event)
+
+    @staticmethod
+    def _upsert_checkpoint(
+        connection: sqlite3.Connection,
+        checkpoint: WorkflowCheckpoint,
+    ) -> None:
+        connection.execute(
+            """INSERT OR REPLACE INTO workflow_checkpoints
+            (run_id, workflow, next_step_index, created_at, payload)
+            VALUES (?, ?, ?, ?, ?)""",
+            (
+                str(checkpoint.run_id),
+                checkpoint.workflow,
+                checkpoint.next_step_index,
+                checkpoint.created_at.isoformat(),
+                checkpoint.model_dump_json(),
+            ),
+        )
+
+    @staticmethod
+    def _insert_phase_event(connection: sqlite3.Connection, event: PhaseEvent) -> None:
+        connection.execute(
+            """INSERT INTO phase_events
+            (id, run_id, workflow, phase, status, occurrence_id, round,
+             parent_run_id, parent_event_id, entity_type, entity_id,
+             input_artifact_ids, output_artifact_ids, started_at, completed_at,
+             summary, warnings, error_code, error_details, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(event.id),
+                str(event.run_id),
+                event.workflow,
+                event.phase,
+                event.status,
+                str(event.occurrence_id),
+                event.round,
+                str(event.parent_run_id) if event.parent_run_id else None,
+                str(event.parent_event_id) if event.parent_event_id else None,
+                event.entity_type,
+                event.entity_id,
+                json.dumps([str(value) for value in event.input_artifact_ids]),
+                json.dumps([str(value) for value in event.output_artifact_ids]),
+                event.started_at.isoformat(),
+                event.completed_at.isoformat() if event.completed_at else None,
+                event.summary,
+                json.dumps(event.warnings, ensure_ascii=False),
+                event.error_code,
+                json.dumps(event.error_details, ensure_ascii=False),
+                event.error,
+            ),
+        )
 
     def list_runs(self) -> list[WorkflowRun]:
         with self.workspace.connect() as connection:
@@ -274,6 +447,19 @@ class RunStore:
             row = connection.execute("SELECT * FROM runs WHERE id=?", (str(run_id),)).fetchone()
         return _run_from_row(row) if row else None
 
+    def get_many(self, run_ids: list[UUID]) -> list[WorkflowRun]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" for _ in run_ids)
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM runs WHERE id IN ({placeholders})",  # noqa: S608
+                tuple(str(run_id) for run_id in run_ids),
+            ).fetchall()
+        parsed = [_run_from_row(row) for row in rows]
+        by_id = {run.id: run for run in parsed}
+        return [by_id[run_id] for run_id in run_ids if run_id in by_id]
+
     def events(self, run_id: UUID) -> list[PhaseEvent]:
         with self.workspace.connect() as connection:
             rows = connection.execute(
@@ -281,6 +467,96 @@ class RunStore:
                 (str(run_id),),
             ).fetchall()
         return [_event_from_row(row) for row in rows]
+
+    def child_run_ids(self, parent_run_id: UUID) -> list[UUID]:
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT run_id FROM phase_events
+                WHERE parent_run_id=? ORDER BY run_id""",
+                (str(parent_run_id),),
+            ).fetchall()
+        return [UUID(str(row["run_id"])) for row in rows]
+
+    def parent_run_id(self, run_id: UUID) -> UUID | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                """SELECT parent_run_id FROM phase_events
+                WHERE run_id=? AND parent_run_id IS NOT NULL
+                ORDER BY started_at, rowid LIMIT 1""",
+                (str(run_id),),
+            ).fetchone()
+        return UUID(str(row["parent_run_id"])) if row is not None else None
+
+    def run_relationships(self) -> tuple[dict[UUID, UUID], dict[UUID, int]]:
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                """SELECT run_id, parent_run_id FROM phase_events
+                WHERE parent_run_id IS NOT NULL
+                GROUP BY run_id, parent_run_id"""
+            ).fetchall()
+        parent_by_child: dict[UUID, UUID] = {}
+        children_by_parent: dict[UUID, set[UUID]] = {}
+        for row in rows:
+            child_id = UUID(str(row["run_id"]))
+            parent_id = UUID(str(row["parent_run_id"]))
+            parent_by_child.setdefault(child_id, parent_id)
+            children_by_parent.setdefault(parent_id, set()).add(child_id)
+        return parent_by_child, {
+            parent_id: len(child_ids) for parent_id, child_ids in children_by_parent.items()
+        }
+
+    def _run_has_retryable_failure(self, run_id: UUID) -> bool:
+        failed_events = [
+            event for event in self.events(run_id) if event.status is PhaseStatus.FAILED
+        ]
+        if not failed_events:
+            return False
+        failed = failed_events[-1]
+        return is_retryable_failure(failed.error_code, failed.error)
+
+    def descendant_run_ids(self, root_run_id: UUID) -> list[UUID]:
+        discovered: list[UUID] = []
+        seen = {root_run_id}
+        frontier = [root_run_id]
+        with self.workspace.connect() as connection:
+            while frontier:
+                placeholders = ",".join("?" for _ in frontier)
+                rows = connection.execute(
+                    f"""SELECT DISTINCT run_id FROM phase_events
+                    WHERE parent_run_id IN ({placeholders}) ORDER BY run_id""",  # noqa: S608
+                    tuple(str(run_id) for run_id in frontier),
+                ).fetchall()
+                next_frontier: list[UUID] = []
+                for row in rows:
+                    run_id = UUID(str(row["run_id"]))
+                    if run_id in seen:
+                        continue
+                    seen.add(run_id)
+                    discovered.append(run_id)
+                    next_frontier.append(run_id)
+                frontier = next_frontier
+        return discovered
+
+    def model_calls(self, run_ids: list[UUID]) -> list[ModelCall]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" for _ in run_ids)
+        with self.workspace.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT payload FROM model_calls
+                WHERE run_id IN ({placeholders}) ORDER BY started_at, id""",  # noqa: S608
+                tuple(str(run_id) for run_id in run_ids),
+            ).fetchall()
+        return [ModelCall.model_validate_json(row["payload"]) for row in rows]
+
+    def latest_human_decision(self, run_id: UUID) -> HumanDecision | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                """SELECT payload FROM human_decisions
+                WHERE run_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (str(run_id),),
+            ).fetchone()
+        return HumanDecision.model_validate_json(row["payload"]) if row else None
 
 
 class MaterialStore:
@@ -513,31 +789,42 @@ class ArtifactStore:
     ) -> ArtifactRef:
         run_dir = self.workspace.artifacts / str(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
-        version = self._next_version(run_id, logical_name)
-        destination = run_dir / _versioned_name(logical_name, version)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact-", dir=run_dir)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_name, destination)
-        except Exception:
-            if os.path.exists(temporary_name):
-                os.unlink(temporary_name)
-            raise
-        artifact = ArtifactRef(
-            run_id=run_id,
-            logical_name=logical_name,
-            version=version,
-            path=destination.relative_to(self.workspace.root),
-            media_type=media_type,
-            sha256=hashlib.sha256(content).hexdigest(),
-            size_bytes=len(content),
-            created_by_phase=created_by_phase,
-        )
-        self._save(artifact)
-        return artifact
+        destination: Path | None = None
+        temporary_name: str | None = None
+        published = False
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                version = self._next_version(connection, run_id, logical_name)
+                destination = run_dir / _versioned_name(logical_name, version)
+                descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact-", dir=run_dir)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_name, destination)
+                temporary_name = None
+                published = True
+                artifact = ArtifactRef(
+                    run_id=run_id,
+                    logical_name=logical_name,
+                    version=version,
+                    path=destination.relative_to(self.workspace.root),
+                    media_type=media_type,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    size_bytes=len(content),
+                    created_by_phase=created_by_phase,
+                )
+                self._insert_artifact(connection, artifact)
+                connection.commit()
+                return artifact
+            except Exception:
+                connection.rollback()
+                if temporary_name is not None and os.path.exists(temporary_name):
+                    os.unlink(temporary_name)
+                if published and destination is not None and destination.exists():
+                    destination.unlink()
+                raise
 
     def write_editable_json(
         self,
@@ -557,7 +844,7 @@ class ArtifactStore:
                 stream.write(serialized)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary_name, destination)
+            _replace_editable_file(Path(temporary_name), destination)
         except Exception:
             if os.path.exists(temporary_name):
                 os.unlink(temporary_name)
@@ -579,6 +866,15 @@ class ArtifactStore:
             ).fetchone()
         return ArtifactRef.model_validate_json(row["payload"]) if row else None
 
+    def latest(self, run_id: UUID, logical_name: str) -> ArtifactRef | None:
+        with self.workspace.connect() as connection:
+            row = connection.execute(
+                """SELECT payload FROM artifacts
+                WHERE run_id=? AND logical_name=? ORDER BY version DESC LIMIT 1""",
+                (str(run_id), logical_name),
+            ).fetchone()
+        return ArtifactRef.model_validate_json(row["payload"]) if row else None
+
     def read_bytes(self, artifact_id: UUID) -> bytes:
         artifact = self.get(artifact_id)
         if artifact is None:
@@ -589,6 +885,16 @@ class ArtifactStore:
             raise ValueError(f"artifact integrity check failed: {artifact_id}")
         return content
 
+    def read_json(self, artifact_id: UUID) -> object:
+        return json.loads(self.read_bytes(artifact_id))
+
+    def read_editable_json(self, parent_run_id: UUID, relative_name: str) -> object:
+        root = (self.workspace.root / "editable" / str(parent_run_id)).resolve()
+        source = (root / relative_name).resolve()
+        if root != source and root not in source.parents:
+            raise ValueError("editable path escapes the parent run directory")
+        return json.loads(source.read_text(encoding="utf-8"))
+
     def verify(self, artifact_id: UUID) -> bool:
         try:
             self.read_bytes(artifact_id)
@@ -596,36 +902,62 @@ class ArtifactStore:
             return False
         return True
 
-    def _next_version(self, run_id: UUID, logical_name: str) -> int:
+    def reconcile(self) -> builtins.list[Path]:
+        removed: builtins.list[Path] = []
         with self.workspace.connect() as connection:
-            row = connection.execute(
-                "SELECT COALESCE(MAX(version), 0) AS version FROM artifacts "
-                "WHERE run_id=? AND logical_name=?",
-                (str(run_id), logical_name),
-            ).fetchone()
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute("SELECT path FROM artifacts").fetchall()
+            referenced = {(self.workspace.root / Path(str(row["path"]))).resolve() for row in rows}
+            for path in self.workspace.artifacts.rglob("*"):
+                if not path.is_file():
+                    continue
+                recognized = path.name.startswith(".artifact-") or re.fullmatch(
+                    r".+\.v[1-9]\d*(?:\.[^.]+)*", path.name
+                )
+                if not recognized or path.resolve() in referenced:
+                    continue
+                path.unlink()
+                removed.append(path.relative_to(self.workspace.root))
+            connection.commit()
+        return sorted(removed, key=str)
+
+    @staticmethod
+    def _next_version(
+        connection: sqlite3.Connection,
+        run_id: UUID,
+        logical_name: str,
+    ) -> int:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(version), 0) AS version FROM artifacts "
+            "WHERE run_id=? AND logical_name=?",
+            (str(run_id), logical_name),
+        ).fetchone()
         return int(row["version"]) + 1
 
-    def _save(self, artifact: ArtifactRef) -> None:
-        with self.workspace.connect() as connection:
-            connection.execute(
-                """INSERT INTO artifacts
-                (id, run_id, logical_name, version, path, media_type, sha256,
-                 size_bytes, created_by_phase, created_at, payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(artifact.id),
-                    str(artifact.run_id),
-                    artifact.logical_name,
-                    artifact.version,
-                    str(artifact.path),
-                    artifact.media_type,
-                    artifact.sha256,
-                    artifact.size_bytes,
-                    artifact.created_by_phase,
-                    artifact.created_at.isoformat(),
-                    artifact.model_dump_json(),
-                ),
-            )
+    @staticmethod
+    def _insert_artifact(
+        connection: sqlite3.Connection,
+        artifact: ArtifactRef,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO artifacts
+            (id, run_id, logical_name, version, path, media_type, sha256,
+             size_bytes, created_by_phase, created_at, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(artifact.id),
+                str(artifact.run_id),
+                artifact.logical_name,
+                artifact.version,
+                str(artifact.path),
+                artifact.media_type,
+                artifact.sha256,
+                artifact.size_bytes,
+                artifact.created_by_phase,
+                artifact.created_at.isoformat(),
+                artifact.model_dump_json(),
+            ),
+        )
 
     @staticmethod
     def sha256(path: Path) -> str:
@@ -636,11 +968,66 @@ class ArtifactStore:
         return digest.hexdigest()
 
 
+def _is_subject_synthesis_validation_recoverable(
+    failed: PhaseEvent,
+    checkpoint: WorkflowCheckpoint,
+) -> bool:
+    if (
+        checkpoint.workflow != "exam_agent_generation"
+        or failed.phase != "SUBJECT_SYNTHESIZING"
+        or failed.error_code != "ValueError"
+    ):
+        return False
+    required_bindings = {
+        "request",
+        "subject_research_manifest",
+        "subject_research_reports",
+    }
+    if not required_bindings <= checkpoint.artifact_bindings.keys():
+        return False
+    error = failed.error or ""
+    return error.startswith(
+        (
+            "subject research synthesis is missing field traces:",
+            "field trace ",
+            "unclaimed field trace ",
+        )
+    )
+
+
+def _is_editable_projection_replace_recoverable(
+    failed: PhaseEvent,
+    checkpoint: WorkflowCheckpoint,
+) -> bool:
+    if (
+        checkpoint.workflow != "exam_question_generation"
+        or failed.phase != "REVIEWS_GENERATING"
+        or failed.error_code != "PermissionError"
+    ):
+        return False
+    required_bindings = {"request", "plan", "question_state", "question", "solution", "rubric"}
+    if not required_bindings <= checkpoint.artifact_bindings.keys():
+        return False
+    error = failed.error or ""
+    return ".editable-" in error and "review-runs.json" in error
+
+
 def _versioned_name(logical_name: str, version: int) -> str:
     path = Path(logical_name)
     suffix = "".join(path.suffixes)
     stem = path.name[: -len(suffix)] if suffix else path.name
     return f"{stem}.v{version}{suffix}"
+
+
+def _replace_editable_file(source: Path, destination: Path) -> None:
+    for attempt in range(_EDITABLE_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == _EDITABLE_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_EDITABLE_REPLACE_BASE_DELAY_SECONDS * (2**attempt))
 
 
 def _run_values(
@@ -702,11 +1089,32 @@ def _migrate_runs(connection: sqlite3.Connection) -> None:
 def _pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _windows_pid_exists(pid)
     try:
         os.kill(pid, 0)
     except OSError:
         return False
     return True
+
+
+def _windows_pid_exists(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _merge_point(existing: KnowledgePoint, incoming: KnowledgePoint) -> KnowledgePoint:
@@ -814,6 +1222,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
     started_at TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS model_calls_run_id_idx ON model_calls(run_id, started_at);
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id),

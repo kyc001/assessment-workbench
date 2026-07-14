@@ -3,15 +3,19 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from assessment_workbench.domain import ModelCall, ModelUsage
+from assessment_workbench.domain import ModelAuditContext, ModelCall, ModelUsage
+from assessment_workbench.errors import RetryableWorkflowError, is_retryable_http_status
+from assessment_workbench.model_contracts import canonical_json_sha256, strict_json_schema
 from assessment_workbench.ports import ModelAuditStore
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
+_strict_schema = strict_json_schema
 
 
 class OpenAICompatibleModel:
@@ -43,6 +47,7 @@ class OpenAICompatibleModel:
         response_model: type[ResponseT],
         prompt_version: str,
         run_id: str | None = None,
+        audit_context: ModelAuditContext | None = None,
     ) -> ResponseT:
         if not self.api_key:
             raise RuntimeError("AW_LLM_API_KEY is required for LLM knowledge extraction")
@@ -60,14 +65,20 @@ class OpenAICompatibleModel:
                     "schema": _strict_schema(response_model.model_json_schema()),
                 },
             },
+            "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": 0,
         }
+        request_sha256 = _sha(request)
         call = ModelCall(
             run_id=UUID(run_id) if run_id else None,
             role=role,
             model=self.model,
             prompt_version=prompt_version,
-            request_sha256=_sha(request),
+            request_sha256=request_sha256,
+            request_sha256_sequence=[request_sha256],
+            audit_context=audit_context,
+            endpoint_origin=_endpoint_origin(self.base_url),
             status="running",
         )
         self.audit_store.save_model_call(call)
@@ -91,12 +102,19 @@ class OpenAICompatibleModel:
                         ),
                     },
                 ]
+                call.repair_count += 1
+                call.request_sha256_sequence.append(_sha(repair_request))
                 payload = await self._post(repair_request)
                 content = _response_content(payload)
                 result = response_model.model_validate_json(content)
             usage = payload.get("usage", {})
             call.status = "succeeded"
             call.response_sha256 = hashlib.sha256(content.encode()).hexdigest()
+            provider_request_id = payload.get("id")
+            call.provider_request_id = (
+                provider_request_id if isinstance(provider_request_id, str) else None
+            )
+            call.finish_reason = _finish_reason(payload)
             call.usage = ModelUsage.model_validate(usage)
             call.completed_at = datetime.now(UTC)
             self.audit_store.save_model_call(call)
@@ -113,37 +131,99 @@ class OpenAICompatibleModel:
             self._request_semaphore,
             httpx.AsyncClient(timeout=self.timeout) as client,
         ):
-            for attempt in range(3):
-                try:
-                    response = await client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers={"Authorization": f"Bearer {self.api_key}"},
-                        json=request,
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-                    if not isinstance(payload, dict):
-                        raise ValueError("model response payload is not an object")
-                    return payload
-                except (httpx.TimeoutException, httpx.NetworkError):
-                    if attempt == 2:
-                        raise
-                except httpx.HTTPStatusError as exc:
-                    if attempt == 2 or exc.response.status_code not in {
-                        429,
-                        502,
-                        503,
-                        504,
-                        524,
-                    }:
-                        raise
-                await asyncio.sleep(0.5 * (2**attempt))
+            try:
+                async with asyncio.timeout(self.timeout):
+                    for attempt in range(3):
+                        try:
+                            async with client.stream(
+                                "POST",
+                                f"{self.base_url}/chat/completions",
+                                headers={
+                                    "Accept": "text/event-stream",
+                                    "Authorization": f"Bearer {self.api_key}",
+                                },
+                                json=request,
+                            ) as response:
+                                response.raise_for_status()
+                                return await _read_response_payload(response)
+                        except (
+                            httpx.TimeoutException,
+                            httpx.NetworkError,
+                            httpx.RemoteProtocolError,
+                        ) as exc:
+                            if attempt == 2:
+                                raise RetryableWorkflowError(str(exc)) from exc
+                        except httpx.HTTPStatusError as exc:
+                            if not is_retryable_http_status(exc.response.status_code):
+                                raise
+                            if attempt == 2:
+                                raise RetryableWorkflowError(str(exc)) from exc
+                        await asyncio.sleep(0.5 * (2**attempt))
+            except TimeoutError as exc:
+                raise RetryableWorkflowError(
+                    f"model request exceeded total timeout of {self.timeout:g} seconds"
+                ) from exc
         raise RuntimeError("model request retry loop exited unexpectedly")
 
 
+async def _read_response_payload(response: httpx.Response) -> dict[str, Any]:
+    content_type = response.headers.get("content-type", "").casefold()
+    if "text/event-stream" not in content_type:
+        await response.aread()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("model response payload is not an object")
+        return payload
+
+    content_parts: list[str] = []
+    usage: dict[str, Any] = {}
+    provider_request_id: str | None = None
+    finish_reason: str | None = None
+    async for line in response.aiter_lines():
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if not data or data == "[DONE]":
+            continue
+        event = json.loads(data)
+        if not isinstance(event, dict):
+            raise ValueError("model stream event is not an object")
+        event_id = event.get("id")
+        if provider_request_id is None and isinstance(event_id, str):
+            provider_request_id = event_id
+        event_usage = event.get("usage")
+        if isinstance(event_usage, dict):
+            usage = event_usage
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        choice = choices[0]
+        choice_finish_reason = choice.get("finish_reason")
+        if isinstance(choice_finish_reason, str):
+            finish_reason = choice_finish_reason
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        if isinstance(content, str):
+            content_parts.append(content)
+
+    if not content_parts:
+        raise ValueError("model stream completed without response content")
+    return {
+        "id": provider_request_id,
+        "choices": [
+            {
+                "message": {"content": "".join(content_parts)},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage,
+    }
+
+
 def _sha(payload: dict[str, Any]) -> str:
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode()).hexdigest()
+    return canonical_json_sha256(payload)
 
 
 def _response_content(payload: dict[str, Any]) -> str:
@@ -153,30 +233,16 @@ def _response_content(payload: dict[str, Any]) -> str:
     return content
 
 
-def _strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(schema)
-    properties = normalized.get("properties")
-    if isinstance(properties, dict):
-        normalized["additionalProperties"] = False
-        normalized["required"] = list(properties)
-        normalized["properties"] = {
-            key: _strict_schema(value) if isinstance(value, dict) else value
-            for key, value in properties.items()
-        }
-    for key in ("$defs", "definitions"):
-        definitions = normalized.get(key)
-        if isinstance(definitions, dict):
-            normalized[key] = {
-                name: _strict_schema(value) if isinstance(value, dict) else value
-                for name, value in definitions.items()
-            }
-    items = normalized.get("items")
-    if isinstance(items, dict):
-        normalized["items"] = _strict_schema(items)
-    for key in ("anyOf", "oneOf", "allOf"):
-        variants = normalized.get(key)
-        if isinstance(variants, list):
-            normalized[key] = [
-                _strict_schema(value) if isinstance(value, dict) else value for value in variants
-            ]
-    return normalized
+def _finish_reason(payload: dict[str, Any]) -> str | None:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    finish_reason = choices[0].get("finish_reason")
+    return finish_reason if isinstance(finish_reason, str) else None
+
+
+def _endpoint_origin(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return base_url
+    return f"{parsed.scheme}://{parsed.netloc}"

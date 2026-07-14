@@ -28,22 +28,31 @@
 
 ## M2：知识点出题
 
-- [ ] Subject Profile
+- [x] Subject Profile
 - [x] 带来源上下文的 QuestionSpec 工作流
-- [ ] 命题、独立解答、Rubric
-- [ ] 多维审核和结构化仲裁
-- [ ] 分类重试和重试预算
-- [ ] 题目版本
+- [x] 命题、独立解答、Rubric
+- [x] 多维审核和结构化仲裁
+- [x] 分类重试和重试预算
+- [x] 题目版本
 
 ## M3：整卷
 
-- [ ] ExamBlueprint
-- [ ] 人工蓝图确认
-- [ ] 每题子工作流
-- [ ] 整卷覆盖、难度、重复和时长审核
-- [ ] LaTeX/PDF
+- [x] 固定能力包和未知科目动态 ExamBlueprint
+- [x] 人工蓝图确认
+- [x] 每题独立并行子工作流、即时落盘和单题重跑
+- [x] 整卷覆盖、难度、重复和时长审核
+- [x] 三视图 LaTeX/PDF、全页检查和发布 Bundle
 
-## M4：数字化和阅卷
+## M4：本地图形化工作台
+
+- [x] 本地单用户 FastAPI + React GUI
+- [x] SSE、轮询降级和断线重连
+- [x] 研究、逐题、审核、Artifact 和三视图 PDF 状态
+- [x] 单题 JSON 编辑、领域校验、单题重跑和 editable 重新组卷
+- [ ] Blueprint 结构化编辑和版本差异
+- [ ] 页面级人工验收操作
+
+## M5：数字化和阅卷
 
 - [ ] 试卷 PDF 到 ExamDocument
 - [ ] 可编辑 LaTeX

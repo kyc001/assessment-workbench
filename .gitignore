@@ -8,6 +8,10 @@ __pycache__/
 .coverage
 dist/
 build/
+frontend/node_modules/
+frontend/.vite/
+frontend/*.tsbuildinfo
+src/assessment_workbench/web_static/
 *.egg-info/
 workspaces/
 tmp/

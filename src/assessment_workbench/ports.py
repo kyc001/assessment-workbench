@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from assessment_workbench.domain import (
     KnowledgePoint,
     KnowledgeRelation,
+    ModelAuditContext,
     ModelCall,
     ParsedDocument,
     RetrievalHit,
@@ -46,6 +47,7 @@ class StructuredModel(Protocol):
         response_model: type[ResponseT],
         prompt_version: str,
         run_id: str | None = None,
+        audit_context: ModelAuditContext | None = None,
     ) -> ResponseT: ...
 
 

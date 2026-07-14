@@ -67,13 +67,17 @@ def test_rubric_rejects_score_mismatch() -> None:
         RubricVersion.model_validate(payload)
 
 
-def test_multiple_choice_requires_options() -> None:
+@pytest.mark.parametrize(
+    "question_type",
+    [QuestionType.MULTIPLE_CHOICE, QuestionType.MULTIPLE_SELECT],
+)
+def test_choice_questions_require_options(question_type: QuestionType) -> None:
     with pytest.raises(ValidationError, match="at least four options"):
         QuestionVersion(
             question_id=uuid4(),
             version=1,
             number=1,
-            question_type=QuestionType.MULTIPLE_CHOICE,
+            question_type=question_type,
             topic_tags=["集合"],
             score=5,
             statement="选择正确结论。",
