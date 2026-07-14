@@ -1,6 +1,7 @@
 import re
 
 from assessment_workbench.domain import (
+    CalculatorPolicy,
     ExamContentBlock,
     ExamContentKind,
     ExamDocument,
@@ -24,10 +25,24 @@ _EXAM_LAYOUT_COMMANDS = r"""
 }
 """.strip()
 
+GENERIC_LATEX_REVIEW_CONTEXT = {
+    "renderer": "generic-latex",
+    "template_version": "generic-v3",
+    "output_target": "A4 PDF rendered by ctexart and Tectonic",
+    "choice_labels": (
+        "The renderer automatically labels ordered option arrays as A, B, C, D. "
+        "Option content must not repeat those labels."
+    ),
+    "math_support": (
+        "amsmath and amssymb are loaded; aligned is supported inside display math. "
+        "Choice-option math is rendered inline to keep each generated label attached."
+    ),
+}
+
 
 class GenericLatexRenderer:
     name = "generic-latex"
-    template_version = "generic-v1"
+    template_version = "generic-v3"
 
     def render(self, exam: ExamDocument, view: ExamView) -> str:
         chinese = exam.language.startswith("zh")
@@ -45,6 +60,7 @@ class GenericLatexRenderer:
         total_label = "满分" if chinese else "Total"
         duration_unit = "分钟" if chinese else "minutes"
         score_unit = "分" if chinese else "points"
+        calculator_notice = _calculator_notice(exam.calculator_policy, chinese=chinese)
         return (
             "\\documentclass[12pt,a4paper]{ctexart}\n"
             "\\usepackage[margin=2.2cm]{geometry}\n"
@@ -60,6 +76,7 @@ class GenericLatexRenderer:
             "\\end{center}\n"
             f"\\noindent {duration_label}: {exam.duration_minutes} {duration_unit}\\hfill "
             f"{total_label}: {exam.total_score} {score_unit}\n\n"
+            f"{calculator_notice}"
             f"{body}\n"
             "\\end{document}\n"
         )
@@ -121,6 +138,27 @@ class GenericLatexRenderer:
         return "\n".join(lines)
 
 
+def _calculator_notice(policy: CalculatorPolicy, *, chinese: bool) -> str:
+    if policy is CalculatorPolicy.UNSPECIFIED:
+        return ""
+    if policy is CalculatorPolicy.PROHIBITED:
+        text = (
+            "计算器：不允许使用；除题目明确要求外，答案应保留精确形式。"
+            if chinese
+            else "Calculator: not permitted; keep answers exact unless instructed otherwise."
+        )
+    else:
+        text = (
+            "计算器：允许使用不具备编程、符号代数或联网功能的普通科学计算器。"
+            if chinese
+            else (
+                "Calculator: a standard scientific calculator without programming, "
+                "symbolic algebra, or network access is permitted."
+            )
+        )
+    return f"\\noindent\\textbf{{{escape_latex(text)}}}\\par\n\n"
+
+
 def _view_title_suffix(view: ExamView, chinese: bool) -> str:
     if not chinese:
         suffixes = {
@@ -175,6 +213,23 @@ def _is_short_embedded_math(blocks: list[ExamContentBlock], index: int) -> bool:
 
 def _render_text(text: str) -> str:
     rendered = escape_latex(text)
+    rendered = re.sub(
+        r"\b(?P<unit>mm|cm|m)\\textasciicircum\{\}(?P<power>[23])\b",
+        lambda match: (
+            rf"\ensuremath{{\mathrm{{{match.group('unit')}}}^{{{match.group('power')}}}}}"
+        ),
+        rendered,
+    )
+    rendered = re.sub(
+        r"(?<![A-Za-z0-9])(?P<name>[A-Za-z])\\_(?P<index>[0-9]+)(?![A-Za-z0-9])",
+        lambda match: rf"\ensuremath{{{match.group('name')}_{match.group('index')}}}",
+        rendered,
+    )
+    rendered = re.sub(
+        r"(?<![A-Za-z0-9])x0(?![A-Za-z0-9])",
+        lambda _match: r"\ensuremath{x_0}",
+        rendered,
+    )
     circled_numbers = {chr(0x2460 + index): rf"\textcircled{{{index + 1}}}" for index in range(10)}
     for symbol, replacement in circled_numbers.items():
         rendered = rendered.replace(symbol, replacement)
@@ -182,6 +237,18 @@ def _render_text(text: str) -> str:
         "∠": r"$\angle$",
         "⊥": r"$\perp$",
         "∥": r"$\parallel$",
+        "≤": r"$\leq$",
+        "≥": r"$\geq$",
+        "≠": r"$\ne$",
+        "≈": r"$\approx$",
+        "∞": r"$\infty$",
+        "∈": r"$\in$",
+        "∉": r"$\notin$",
+        "∪": r"$\cup$",
+        "∩": r"$\cap$",
+        "±": r"$\pm$",
+        "×": r"$\times$",
+        "→": r"$\to$",
     }
     for symbol, replacement in math_symbols.items():
         rendered = rendered.replace(symbol, replacement)
@@ -228,6 +295,10 @@ def validate_math(expression: str) -> str:
 
 def _normalize_math(expression: str) -> str:
     normalized = expression
+    normalized = re.sub(r"(?<!\\)\bmax\b", r"\\max", normalized)
+    normalized = re.sub(r"(?<!\\)\bmin\b", r"\\min", normalized)
+    normalized = re.sub(r"\s+at\s+", r" \\text{ at } ", normalized)
+    normalized = re.sub(r"\s+and\s+", r" \\text{ and } ", normalized)
     normalized = re.sub(r"\s*<=\s*", r" \\leq ", normalized)
     normalized = re.sub(r"\s*>=\s*", r" \\geq ", normalized)
     sqrt_pattern = re.compile(r"(?<![\\A-Za-z])sqrt\(([^()]*)\)")

@@ -139,7 +139,8 @@ class RunStore:
             raise KeyError(f"run not found: {run_id}")
         if run.status is not RunStatus.FAILED:
             raise ValueError(f"run is not failed: {run.status}")
-        if self.get_checkpoint(run_id) is None:
+        checkpoint = self.get_checkpoint(run_id)
+        if checkpoint is None:
             raise ValueError(f"failed run has no recovery checkpoint: {run_id}")
         failed_events = [
             event for event in self.events(run_id) if event.status is PhaseStatus.FAILED
@@ -149,6 +150,10 @@ class RunStore:
         failed = failed_events[-1]
         retryable_child_run_ids: list[UUID] = []
         retryable = is_retryable_failure(failed.error_code, failed.error)
+        recovery_kind = "transient_failure" if retryable else ""
+        if not retryable and _is_subject_synthesis_validation_recoverable(failed, checkpoint):
+            retryable = True
+            recovery_kind = "subject_synthesis_validation"
         if not retryable and failed.phase == "QUESTIONS_GENERATING":
             child_runs = [
                 child
@@ -168,6 +173,8 @@ class RunStore:
                 and child.id not in retryable_child_run_ids
             ]
             retryable = bool(retryable_child_run_ids) and not nonrecoverable_children
+            if retryable:
+                recovery_kind = "retryable_question_children"
         if not retryable:
             raise ValueError(f"failed run error is not retryable: {failed.error_code or 'unknown'}")
         validate_run_transition(run.status, RunStatus.INTERRUPTED)
@@ -187,6 +194,7 @@ class RunStore:
                 "failed_phase": failed.phase,
                 "failed_error_code": failed.error_code or "unknown",
                 "failed_error": failed.error or "",
+                "recovery_kind": recovery_kind,
                 "retryable_child_run_ids": ",".join(
                     str(child_run_id) for child_run_id in retryable_child_run_ids
                 ),
@@ -234,6 +242,33 @@ class RunStore:
             raise ValueError("phase event and checkpoint must belong to the same workflow run")
         with self.workspace.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._insert_phase_event(connection, event)
+            self._upsert_checkpoint(connection, checkpoint)
+            connection.commit()
+
+    def commit_checkpoint_override(
+        self,
+        event: PhaseEvent,
+        checkpoint: WorkflowCheckpoint,
+        *,
+        binding_key: str,
+        expected_artifact_id: UUID,
+    ) -> None:
+        if event.status is not PhaseStatus.COMPLETED:
+            raise ValueError("checkpoint override requires a completed phase event")
+        if event.run_id != checkpoint.run_id or event.workflow != checkpoint.workflow:
+            raise ValueError("phase event and checkpoint must belong to the same workflow run")
+        with self.workspace.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload FROM workflow_checkpoints WHERE run_id=?",
+                (str(checkpoint.run_id),),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"run has no checkpoint: {checkpoint.run_id}")
+            current = WorkflowCheckpoint.model_validate_json(row["payload"])
+            if current.artifact_bindings.get(binding_key) != expected_artifact_id:
+                raise ValueError(f"checkpoint binding changed during override: {binding_key}")
             self._insert_phase_event(connection, event)
             self._upsert_checkpoint(connection, checkpoint)
             connection.commit()
@@ -878,6 +913,33 @@ class ArtifactStore:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+
+def _is_subject_synthesis_validation_recoverable(
+    failed: PhaseEvent,
+    checkpoint: WorkflowCheckpoint,
+) -> bool:
+    if (
+        checkpoint.workflow != "exam_agent_generation"
+        or failed.phase != "SUBJECT_SYNTHESIZING"
+        or failed.error_code != "ValueError"
+    ):
+        return False
+    required_bindings = {
+        "request",
+        "subject_research_manifest",
+        "subject_research_reports",
+    }
+    if not required_bindings <= checkpoint.artifact_bindings.keys():
+        return False
+    error = failed.error or ""
+    return error.startswith(
+        (
+            "subject research synthesis is missing field traces:",
+            "field trace ",
+            "unclaimed field trace ",
+        )
+    )
 
 
 def _versioned_name(logical_name: str, version: int) -> str:

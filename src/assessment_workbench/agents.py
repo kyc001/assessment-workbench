@@ -1,5 +1,7 @@
 import asyncio
+import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -20,7 +22,6 @@ from assessment_workbench.document_workflow import (
 )
 from assessment_workbench.domain import (
     ArtifactRef,
-    BlueprintDraft,
     ExamArbitrationDecision,
     ExamBlueprint,
     ExamDocument,
@@ -39,14 +40,19 @@ from assessment_workbench.domain import (
     RunStatus,
     SubjectProfile,
     SubjectProfileCandidate,
+    SubjectResearchReport,
+    SubjectResearchRunRecord,
+    SubjectResearchSynthesis,
     WorkflowCheckpoint,
     WorkflowRun,
 )
 from assessment_workbench.errors import RetryableWorkflowError
 from assessment_workbench.exam_quality import (
     allocate_question_slot_coverage,
+    resolve_exam_targets,
     validate_bundle_for_plan,
     validate_question_plan_coverage,
+    validate_question_plan_timing,
 )
 from assessment_workbench.exam_review_workflow import parse_exam_review_records
 from assessment_workbench.exam_workflow import ExamQualityWorkflow
@@ -59,6 +65,10 @@ from assessment_workbench.prompting import (
 from assessment_workbench.question_workflow import ModelRouter, QuestionAgentWorkflow
 from assessment_workbench.release import DOCUMENT_APPROVAL, RELEASE_BUNDLING, ReleaseBundleBuilder
 from assessment_workbench.storage import ArtifactStore, RunStore
+from assessment_workbench.subject_research_workflow import (
+    SubjectResearchPoolWorkflow,
+    parse_subject_research_records,
+)
 from assessment_workbench.workflow import Step, WorkflowEngine
 
 __all__ = ["ExamAgentWorkflow", "ModelRouter"]
@@ -75,7 +85,7 @@ class ExamAgentWorkflow:
         max_total_question_rounds: int = 7,
         max_draft_validation_attempts: int = 3,
         max_reviewer_attempts: int = 2,
-        max_exam_reviewer_attempts: int = 2,
+        max_exam_reviewer_attempts: int = 3,
         max_exam_review_rounds: int = 3,
         max_parallel_questions: int = 1,
         compiler: LatexCompiler | None = None,
@@ -102,6 +112,13 @@ class ExamAgentWorkflow:
         self.pdf_inspector = pdf_inspector
         self.capabilities = capability_catalog or load_default_capability_catalog()
         self.prompts = self.capabilities.prompts
+        self.subject_research = SubjectResearchPoolWorkflow(
+            models.strong,
+            artifacts,
+            runs,
+            self.capabilities,
+            max_attempts=max_draft_validation_attempts,
+        )
         self.question_workflow = QuestionAgentWorkflow(
             models,
             artifacts,
@@ -243,112 +260,170 @@ class ExamAgentWorkflow:
                 request.model_dump(mode="json"),
                 created_by_phase="SUBJECT_RESEARCHING",
             )
-            if provided_profile is None:
-                prompt = self.prompts.require("subject_researcher")
-                validation_feedback: list[str] = []
-                for validation_attempt in range(self.max_draft_validation_attempts):
-                    candidate = await complete_with_prompt(
-                        self.models.strong,
-                        prompt=prompt,
-                        user_prompt=json_prompt(
-                            subject=subject,
-                            target_level=target_level,
-                            requirements=requirements,
-                            source_context=source_context,
-                            registered_reviewers=self.capabilities.reviewers.names(),
-                            registered_tools=self.capabilities.tools.names(),
-                            revision_feedback=validation_feedback,
-                        ),
-                        response_model=SubjectProfileCandidate,
-                        run_id=state["run_id"],
-                        artifacts=self.artifacts,
-                        created_by_phase="SUBJECT_RESEARCHING",
-                        input_artifact_ids=[
-                            request_artifact.id,
-                            *context_artifact_ids(state),
-                        ],
+            if provided_profile is not None:
+                self.capabilities.validate_profile(provided_profile, capability_validators)
+                artifact = self.artifacts.write_json(
+                    state["run_id"],
+                    "subject-profile.json",
+                    provided_profile.model_dump(mode="json"),
+                    created_by_phase="SUBJECT_RESEARCHING",
+                )
+                return {
+                    "profile": provided_profile,
+                    "output_artifact_ids": [request_artifact.id, artifact.id],
+                    "_checkpoint_artifacts": {
+                        "request": request_artifact.id,
+                        "profile": artifact.id,
+                    },
+                }
+            restored_records = state.get("subject_research_records")
+            outcome = await self.subject_research.execute(
+                state["run_id"],
+                subject=subject,
+                target_level=target_level,
+                requirements=requirements,
+                source_context=source_context,
+                restored_records=restored_records,
+                input_artifact_ids=[request_artifact.id, *context_artifact_ids(state)],
+            )
+            reports_artifact = self.artifacts.write_json(
+                state["run_id"],
+                "subject-research-reports.json",
+                [report.model_dump(mode="json") for report in outcome.reports.values()],
+                created_by_phase="SUBJECT_RESEARCHING",
+            )
+            if len(outcome.reports) < self.subject_research.quorum:
+                message = (
+                    "subject research quorum was not reached: "
+                    f"{len(outcome.reports)}/{self.subject_research.quorum}"
+                )
+                if any(record.status is RunStatus.INTERRUPTED for record in outcome.records):
+                    raise RetryableWorkflowError(message)
+                raise RuntimeError(message)
+            return {
+                "subject_research_reports": list(outcome.reports.values()),
+                "subject_research_records": outcome.records,
+                "subject_research_manifest_artifact": outcome.manifest_artifact,
+                "output_artifact_ids": [
+                    request_artifact.id,
+                    outcome.manifest_artifact.id,
+                    reports_artifact.id,
+                ],
+                "_checkpoint_artifacts": {
+                    "request": request_artifact.id,
+                    "subject_research_manifest": outcome.manifest_artifact.id,
+                    "subject_research_reports": reports_artifact.id,
+                },
+                "_checkpoint_child_run_ids": outcome.child_run_ids,
+            }
+
+        async def synthesize_subject(state: dict[str, Any]) -> dict[str, Any]:
+            if provided_profile is not None:
+                return {}
+            reports = state.get("subject_research_reports")
+            records = state.get("subject_research_records")
+            if not isinstance(reports, list) or not all(
+                isinstance(report, SubjectResearchReport) for report in reports
+            ):
+                raise ValueError("subject synthesis requires valid research reports")
+            if not isinstance(records, list) or not all(
+                isinstance(record, SubjectResearchRunRecord) for record in records
+            ):
+                raise ValueError("subject synthesis requires research run records")
+            successful_ids = [
+                record.run_id for record in records if record.status is RunStatus.SUCCEEDED
+            ]
+            failed_ids = [
+                record.run_id for record in records if record.status is not RunStatus.SUCCEEDED
+            ]
+            prompt = self.prompts.require("subject_research_synthesizer")
+            validation_feedback: list[str] = []
+            for attempt in range(self.max_draft_validation_attempts):
+                synthesis = await complete_with_prompt(
+                    self.models.strong,
+                    prompt=prompt,
+                    user_prompt=json_prompt(
+                        subject=subject,
+                        target_level=target_level,
+                        requirements=requirements,
+                        source_context=source_context,
+                        research_reports=[report.model_dump(mode="json") for report in reports],
+                        registered_reviewers=self.capabilities.reviewers.names(),
+                        registered_tools=self.capabilities.tools.names(),
+                        revision_feedback=validation_feedback,
+                    ),
+                    response_model=SubjectResearchSynthesis,
+                    run_id=state["run_id"],
+                    artifacts=self.artifacts,
+                    created_by_phase="SUBJECT_SYNTHESIZING",
+                    input_artifact_ids=context_artifact_ids(state),
+                )
+                synthesis = synthesis.model_copy(
+                    update={
+                        "successful_research_run_ids": successful_ids,
+                        "failed_research_run_ids": failed_ids,
+                    }
+                )
+                try:
+                    _validate_subject_research_synthesis(synthesis, reports)
+                    profile = _materialize_subject_profile(synthesis.profile)
+                    blueprint = ExamBlueprint(
+                        id=f"{profile.id}-{uuid4().hex[:12]}",
+                        subject_profile=profile.id,
+                        **synthesis.blueprint.model_dump(),
                     )
-                    profile = SubjectProfile(
-                        id=candidate.subject_id,
-                        display_name=candidate.display_name,
-                        supported_question_types=candidate.supported_question_types,
-                        reviewers=candidate.reviewers,
-                        tools=candidate.tools,
-                        latex_template="generic-v1",
-                        difficulty_dimensions=candidate.difficulty_dimensions,
-                        conventions=candidate.conventions,
-                        source_summary=candidate.source_summary,
-                    )
-                    try:
-                        self.capabilities.validate_profile(profile)
-                        break
-                    except ValueError as exc:
-                        if validation_attempt == self.max_draft_validation_attempts - 1:
-                            raise
-                        validation_feedback = [
-                            "The previous profile referenced unavailable capabilities. "
-                            f"Choose only registered names. Error: {exc}"
-                        ]
-                else:
-                    raise RuntimeError("subject profile validation loop exited unexpectedly")
+                    self.capabilities.validate_profile(profile)
+                    self.capabilities.validate_blueprint(profile, blueprint)
+                    _blueprint_slots(blueprint)
+                    break
+                except ValueError as exc:
+                    if attempt == self.max_draft_validation_attempts - 1:
+                        raise
+                    validation_feedback = [
+                        "The previous synthesis was not traceable or executable. "
+                        f"Return a corrected synthesis. Error: {exc}"
+                    ]
             else:
-                profile = provided_profile
-            self.capabilities.validate_profile(profile, capability_validators)
-            artifact = self.artifacts.write_json(
+                raise RuntimeError("subject synthesis retry loop exited unexpectedly")
+            synthesis_artifact = self.artifacts.write_json(
+                state["run_id"],
+                "subject-research-synthesis.json",
+                synthesis.model_dump(mode="json"),
+                created_by_phase="SUBJECT_SYNTHESIZING",
+            )
+            profile_artifact = self.artifacts.write_json(
                 state["run_id"],
                 "subject-profile.json",
                 profile.model_dump(mode="json"),
-                created_by_phase="SUBJECT_RESEARCHING",
+                created_by_phase="SUBJECT_SYNTHESIZING",
+            )
+            research_blueprint_artifact = self.artifacts.write_json(
+                state["run_id"],
+                "subject-research-blueprint.json",
+                blueprint.model_dump(mode="json"),
+                created_by_phase="SUBJECT_SYNTHESIZING",
             )
             return {
                 "profile": profile,
-                "output_artifact_ids": [request_artifact.id, artifact.id],
+                "blueprint": blueprint,
+                "subject_research_synthesis": synthesis,
+                "subject_research_synthesis_artifact": synthesis_artifact,
+                "output_artifact_ids": [
+                    synthesis_artifact.id,
+                    profile_artifact.id,
+                    research_blueprint_artifact.id,
+                ],
                 "_checkpoint_artifacts": {
-                    "request": request_artifact.id,
-                    "profile": artifact.id,
+                    "subject_research_synthesis": synthesis_artifact.id,
+                    "profile": profile_artifact.id,
+                    "research_blueprint": research_blueprint_artifact.id,
                 },
             }
 
         async def plan_exam(state: dict[str, Any]) -> dict[str, Any]:
             profile: SubjectProfile = state["profile"]
             if provided_blueprint is None:
-                prompt = self.prompts.require("exam_blueprint_planner")
-                validation_feedback: list[str] = []
-                for validation_attempt in range(self.max_draft_validation_attempts):
-                    draft = await complete_with_prompt(
-                        self.models.strong,
-                        prompt=prompt,
-                        user_prompt=json_prompt(
-                            subject_profile=profile.model_dump(mode="json"),
-                            target_level=target_level,
-                            requirements=requirements,
-                            source_context=source_context,
-                            capability_context=request.capability_context,
-                            revision_feedback=validation_feedback,
-                        ),
-                        response_model=BlueprintDraft,
-                        run_id=state["run_id"],
-                        artifacts=self.artifacts,
-                        created_by_phase="EXAM_PLANNING",
-                        input_artifact_ids=context_artifact_ids(state),
-                    )
-                    exam_blueprint = ExamBlueprint(
-                        id=f"{profile.id}-{uuid4().hex[:12]}",
-                        subject_profile=profile.id,
-                        **draft.model_dump(),
-                    )
-                    try:
-                        self.capabilities.validate_blueprint(profile, exam_blueprint)
-                        break
-                    except ValueError as exc:
-                        if validation_attempt == self.max_draft_validation_attempts - 1:
-                            raise
-                        validation_feedback = [
-                            "The previous blueprint failed registered capability validation. "
-                            f"Return a complete corrected blueprint. Error: {exc}"
-                        ]
-                else:
-                    raise RuntimeError("exam blueprint validation loop exited unexpectedly")
+                exam_blueprint = state["blueprint"]
             else:
                 exam_blueprint = provided_blueprint
             self.capabilities.validate_blueprint(
@@ -370,6 +445,11 @@ class ExamAgentWorkflow:
                 blueprint_version=exam_blueprint.version,
                 capability_id=request.capability_id,
                 capability_version=request.capability_version,
+                research_synthesis_artifact_id=(
+                    state["subject_research_synthesis_artifact"].id
+                    if isinstance(state.get("subject_research_synthesis_artifact"), ArtifactRef)
+                    else None
+                ),
             )
             planning_artifact = self.artifacts.write_json(
                 state["run_id"],
@@ -397,7 +477,18 @@ class ExamAgentWorkflow:
             return {
                 "_human_review": {
                     "prompt": "Approve the generated exam blueprint before question planning.",
-                    "artifact_ids": [bindings["blueprint"], bindings["planning"]],
+                    "artifact_ids": [
+                        bindings[key]
+                        for key in (
+                            "subject_research_manifest",
+                            "subject_research_reports",
+                            "subject_research_synthesis",
+                            "profile",
+                            "blueprint",
+                            "planning",
+                        )
+                        if key in bindings
+                    ],
                     "retry_phase": "EXAM_PLANNING",
                 }
             }
@@ -579,6 +670,43 @@ class ExamAgentWorkflow:
                 else set()
             )
             exam_round = exam_state.round if isinstance(exam_state, ExamWorkflowState) else 0
+            for number, record in list(records_by_number.items()):
+                if (
+                    number in target_numbers
+                    or record.get("exam_round") != exam_round
+                    or record.get("status") == RunStatus.SUCCEEDED
+                ):
+                    continue
+                history = record.get("replacement_history", [])
+                if not isinstance(history, list):
+                    continue
+                previous = next(
+                    (
+                        item
+                        for item in reversed(history)
+                        if isinstance(item, dict)
+                        and item.get("status") in {RunStatus.SUCCEEDED, RunStatus.SUCCEEDED.value}
+                        and item.get("bundle_artifact_id")
+                    ),
+                    None,
+                )
+                if previous is None:
+                    continue
+                bundle_artifact = self.artifacts.get(UUID(str(previous["bundle_artifact_id"])))
+                if bundle_artifact is None:
+                    continue
+                records_by_number[number] = {
+                    **record,
+                    "run_id": previous.get("run_id"),
+                    "status": RunStatus.SUCCEEDED,
+                    "error": None,
+                    "bundle_artifact_id": str(bundle_artifact.id),
+                    "bundle_path": str(bundle_artifact.path),
+                    "editable_path": str(
+                        Path("editable") / str(state["run_id"]) / "questions" / f"{number:02d}.json"
+                    ),
+                    "exam_round": previous.get("exam_round", 0),
+                }
             for number in target_numbers:
                 if number not in records_by_number:
                     raise ValueError(f"replacement target has no question plan: {number}")
@@ -672,6 +800,22 @@ class ExamAgentWorkflow:
                 plan: QuestionPlan,
             ) -> tuple[QuestionPlan, WorkflowRun, dict[str, Any]]:
                 async with semaphore:
+                    generation_feedback = (
+                        _question_feedback_for_number(
+                            exam_state.question_feedback,
+                            plan.number,
+                        )
+                        if isinstance(exam_state, ExamWorkflowState)
+                        and plan.number in target_numbers
+                        else []
+                    )
+                    existing_run: WorkflowRun | None = None
+                    existing_run_id = records_by_number[plan.number].get("run_id")
+                    if existing_run_id is not None:
+                        try:
+                            existing_run = self.runs.get(UUID(str(existing_run_id)))
+                        except ValueError:
+                            existing_run = None
                     await update_record(
                         plan.number,
                         {
@@ -696,23 +840,40 @@ class ExamAgentWorkflow:
                             created_by_phase="QUESTION_CHILD_CREATED",
                         )
 
-                    child_run, child_state = await self.generate_question_run(
-                        profile=profile,
-                        blueprint=blueprint,
-                        plan=plan,
-                        source_context=source_context,
-                        parent_run_id=state["run_id"],
-                        capability_id=request.capability_id,
-                        capability_version=request.capability_version,
-                        capability_context=request.capability_context,
-                        generation_feedback=(
-                            exam_state.question_feedback
-                            if isinstance(exam_state, ExamWorkflowState)
-                            and plan.number in target_numbers
-                            else []
-                        ),
-                        on_run_created=child_created,
-                    )
+                    resume_existing = False
+                    if existing_run is not None and existing_run.status is RunStatus.INTERRUPTED:
+                        previous_request = self.artifacts.latest(
+                            existing_run.id,
+                            "question-request.json",
+                        )
+                        if previous_request is not None:
+                            try:
+                                parsed_request = QuestionGenerationRequest.model_validate(
+                                    self.artifacts.read_json(previous_request.id)
+                                )
+                            except (KeyError, OSError, ValueError):
+                                pass
+                            else:
+                                resume_existing = (
+                                    parsed_request.plan.id == plan.id
+                                    and parsed_request.generation_feedback == generation_feedback
+                                )
+                    if resume_existing:
+                        assert existing_run is not None
+                        child_run, child_state = await self.resume_question_run(existing_run.id)
+                    else:
+                        child_run, child_state = await self.generate_question_run(
+                            profile=profile,
+                            blueprint=blueprint,
+                            plan=plan,
+                            source_context=source_context,
+                            parent_run_id=state["run_id"],
+                            capability_id=request.capability_id,
+                            capability_version=request.capability_version,
+                            capability_context=request.capability_context,
+                            generation_feedback=generation_feedback,
+                            on_run_created=child_created,
+                        )
                     bundle = child_state.get("bundle")
                     bundle_artifact = child_state.get("bundle_artifact")
                     if (
@@ -826,6 +987,7 @@ class ExamAgentWorkflow:
                 duration_minutes=blueprint.duration_minutes,
                 total_score=blueprint.total_score,
                 language=blueprint.language,
+                calculator_policy=blueprint.calculator_policy,
                 questions=state["bundles"],
             )
             artifact = self.artifacts.write_json(
@@ -1051,6 +1213,7 @@ class ExamAgentWorkflow:
 
         steps: list[tuple[str, Step]] = [
             ("SUBJECT_RESEARCHING", research_subject),
+            ("SUBJECT_SYNTHESIZING", synthesize_subject),
             ("EXAM_PLANNING", plan_exam),
             ("BLUEPRINT_APPROVAL", approve_blueprint),
             ("QUESTION_PLANNING", plan_questions),
@@ -1092,6 +1255,34 @@ class ExamAgentWorkflow:
         profile_payload = payload("profile")
         if profile_payload is not None:
             state["profile"] = SubjectProfile.model_validate(profile_payload)
+        research_manifest = payload("subject_research_manifest")
+        if research_manifest is not None:
+            state["subject_research_records"] = parse_subject_research_records(research_manifest)
+            manifest_id = checkpoint.artifact_bindings["subject_research_manifest"]
+            manifest_artifact = self.artifacts.get(manifest_id)
+            if manifest_artifact is None:
+                raise ValueError(f"subject research manifest is missing: {manifest_id}")
+            state["subject_research_manifest_artifact"] = manifest_artifact
+        research_reports = payload("subject_research_reports")
+        if research_reports is not None:
+            if not isinstance(research_reports, list):
+                raise ValueError("subject research reports artifact is not a list")
+            state["subject_research_reports"] = [
+                SubjectResearchReport.model_validate(item) for item in research_reports
+            ]
+        synthesis_payload = payload("subject_research_synthesis")
+        if synthesis_payload is not None:
+            state["subject_research_synthesis"] = SubjectResearchSynthesis.model_validate(
+                synthesis_payload
+            )
+            synthesis_id = checkpoint.artifact_bindings["subject_research_synthesis"]
+            synthesis_artifact = self.artifacts.get(synthesis_id)
+            if synthesis_artifact is None:
+                raise ValueError(f"subject research synthesis is missing: {synthesis_id}")
+            state["subject_research_synthesis_artifact"] = synthesis_artifact
+        research_blueprint_payload = payload("research_blueprint")
+        if research_blueprint_payload is not None:
+            state["blueprint"] = ExamBlueprint.model_validate(research_blueprint_payload)
         blueprint_payload = payload("blueprint")
         if blueprint_payload is not None:
             state["blueprint"] = ExamBlueprint.model_validate(blueprint_payload)
@@ -1147,6 +1338,26 @@ class ExamAgentWorkflow:
         exam_decision_payload = payload("exam_decision")
         if exam_decision_payload is not None:
             state["exam_decision"] = ExamArbitrationDecision.model_validate(exam_decision_payload)
+        exam_state = state.get("exam_workflow_state")
+        decision = state.get("exam_decision")
+        exam = state.get("exam")
+        blueprint = state.get("blueprint")
+        if (
+            isinstance(exam_state, ExamWorkflowState)
+            and isinstance(decision, ExamArbitrationDecision)
+            and isinstance(exam, ExamDocument)
+            and isinstance(blueprint, ExamBlueprint)
+            and (decision.question_ids or decision.section_ids)
+        ):
+            state["exam_workflow_state"] = exam_state.model_copy(
+                update={
+                    "replacement_question_numbers": resolve_exam_targets(
+                        decision,
+                        exam,
+                        blueprint,
+                    )
+                }
+            )
         return state
 
     async def generate_question_run(
@@ -1202,6 +1413,15 @@ def _question_bundle_artifact_ids(payload: object, *, expected: int) -> list[UUI
     return [by_number[number] for number in range(1, expected + 1)]
 
 
+def _question_feedback_for_number(feedback: list[str], number: int) -> list[str]:
+    selected: list[str] = []
+    for message in feedback:
+        match = re.match(r"\s*Q(\d+)\b", message, flags=re.IGNORECASE)
+        if match is None or int(match.group(1)) == number:
+            selected.append(message)
+    return selected
+
+
 def _blueprint_slots(blueprint: ExamBlueprint) -> list[QuestionSlot]:
     slots: list[QuestionSlot] = []
     number = 1
@@ -1220,6 +1440,80 @@ def _blueprint_slots(blueprint: ExamBlueprint) -> list[QuestionSlot]:
             )
             number += 1
     return allocate_question_slot_coverage(blueprint, slots)
+
+
+def _materialize_subject_profile(candidate: SubjectProfileCandidate) -> SubjectProfile:
+    return SubjectProfile(
+        id=candidate.subject_id,
+        display_name=candidate.display_name,
+        supported_question_types=candidate.supported_question_types,
+        reviewers=candidate.reviewers,
+        tools=candidate.tools,
+        latex_template="generic-v1",
+        difficulty_dimensions=candidate.difficulty_dimensions,
+        conventions=candidate.conventions,
+        source_summary=candidate.source_summary,
+    )
+
+
+def _validate_subject_research_synthesis(
+    synthesis: SubjectResearchSynthesis,
+    reports: list[SubjectResearchReport],
+) -> None:
+    successful_ids = set(synthesis.successful_research_run_ids)
+    if len(successful_ids) < 2:
+        raise ValueError("subject research synthesis requires at least two successful runs")
+    claim_ids = {
+        f"{report.research_role}:{claim.id}" for report in reports for claim in report.claims
+    }
+    evidence_ids = {
+        f"{report.research_role}:{evidence.id}"
+        for report in reports
+        for evidence in report.evidence
+    }
+    if not set(synthesis.adopted_claim_ids) <= claim_ids:
+        raise ValueError("subject research synthesis adopts unknown claims")
+    if not set(synthesis.rejected_claim_ids) <= claim_ids:
+        raise ValueError("subject research synthesis rejects unknown claims")
+    required_paths = {
+        "profile.display_name",
+        "profile.supported_question_types",
+        "blueprint.duration_minutes",
+        "blueprint.total_score",
+        "blueprint.sections",
+        "blueprint.coverage",
+        "blueprint.difficulty_distribution",
+    }
+    trace_paths = {trace.target_path for trace in synthesis.field_traces}
+    missing_paths = required_paths - trace_paths
+    if missing_paths:
+        raise ValueError(f"subject research synthesis is missing field traces: {missing_paths}")
+    unclaimed_extra_decision_types = {
+        "assumption",
+        "default",
+        "human_override",
+        "system_default",
+    }
+    for trace in synthesis.field_traces:
+        if not set(trace.claim_ids) <= claim_ids:
+            raise ValueError(f"field trace {trace.target_path} references unknown claims")
+        if not set(trace.evidence_ids) <= evidence_ids:
+            raise ValueError(f"field trace {trace.target_path} references unknown evidence")
+        if trace.target_path in required_paths and not trace.claim_ids:
+            if trace.decision_type == "assumption":
+                continue
+            raise ValueError(
+                f"field trace {trace.target_path} needs claims or decision_type=assumption"
+            )
+        if (
+            trace.target_path not in required_paths
+            and not trace.claim_ids
+            and trace.decision_type not in unclaimed_extra_decision_types
+        ):
+            raise ValueError(
+                f"unclaimed field trace {trace.target_path} has unsupported decision type "
+                f"{trace.decision_type}"
+            )
 
 
 def _materialize_question_plans(
@@ -1256,4 +1550,5 @@ def _materialize_question_plans(
             )
         )
     validate_question_plan_coverage(blueprint, plans)
+    validate_question_plan_timing(blueprint, plans)
     return plans

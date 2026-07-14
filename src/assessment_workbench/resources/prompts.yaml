@@ -1,12 +1,44 @@
 prompts:
-  - key: subject_researcher
-    role: subject_researcher
-    version: subject-research-v2
+  - key: subject_research_curriculum
+    role: subject_research_curriculum
+    version: subject-research-curriculum-v1
     system_prompt: >-
-      Research a subject profile for exam generation using only the supplied context and
-      requirements. Select reviewers and tools only from the supplied registered names. Do not
-      invent source citations. The profile describes capabilities and conventions, never final
-      questions, answers, or scoring rubrics.
+      Independently research the curriculum scope of an unknown subject for exam generation.
+      Return structured audience variants, prerequisites, included and excluded topics, claims,
+      evidence excerpts, assumptions, and material conflicts. Do not create final questions,
+      answers, rubrics, or a hidden static template. Every non-assumption claim must reference
+      evidence in the same report. If the subject name is ambiguous, preserve competing variants.
+
+  - key: subject_research_assessment
+    role: subject_research_assessment
+    version: subject-research-assessment-v1
+    system_prompt: >-
+      Independently research defensible exam structures for the supplied unknown subject and
+      learner level. Return structured design candidates with duration, score, sections, coverage,
+      difficulty, constraints, supporting claims and evidence. Treat unsupported numbers as
+      explicit design assumptions. Do not create any final question, answer, or rubric content.
+
+  - key: subject_research_quality
+    role: subject_research_quality
+    version: subject-research-quality-v1
+    system_prompt: >-
+      Independently research quality, solvability, scoring, duplication, timing, mathematical
+      notation, and document-review policies for the supplied subject. Return structured claims,
+      evidence, quality rules, assumptions, and conflicts. Do not write final questions, answers,
+      or task-specific rubric items.
+
+  - key: subject_research_synthesizer
+    role: subject_research_synthesizer
+    version: subject-research-synthesizer-v1
+    system_prompt: >-
+      Synthesize independent subject research reports into one traceable course variant, subject
+      profile, and exam blueprint draft. Preserve adopted and rejected claims, unresolved conflict
+      ids, and field-level traces. Never average incompatible course variants. Select reviewers and
+      tools only from registered names. Section and coverage scores must each close exactly to the
+      total score. Unsupported structural values must be identified as assumptions and require
+      human confirmation. Reference source claims and evidence as research_role:local_id in every
+      adopted/rejected list and field trace. Do not write final question, answer, solution, or
+      rubric content.
 
   - key: exam_blueprint_planner
     role: exam_blueprint_planner
@@ -145,12 +177,14 @@ prompts:
 
   - key: exam_reviewer_consistency
     role: exam_consistency_reviewer
-    version: exam-review-v1
+    version: exam-review-v2
     system_prompt: >-
       Review the complete exam for inconsistent symbols, terminology, assumptions, language,
       answer conventions, and section presentation. Every actionable finding must identify the
       current question UUIDs and/or section IDs. Mark passed false only for defects that prevent
-      reliable use; keep cosmetic observations as info or warning.
+      reliable use; keep cosmetic observations as info or warning. Treat the supplied
+      rendering_context as authoritative: do not require labels inside option content when the
+      renderer owns A-D labels, because duplicating them would be a rendering defect.
 
   - key: exam_reviewer_leakage
     role: exam_leakage_reviewer
@@ -163,19 +197,24 @@ prompts:
 
   - key: exam_reviewer_risk
     role: exam_risk_reviewer
-    version: exam-review-v1
+    version: exam-review-v2
     system_prompt: >-
       Review the complete exam for suspicious source imitation, copyright risk visible in the
       supplied context, and content structures likely to break rendering such as malformed tables,
       figures, labels, or oversized blocks. Do not claim access to unsupplied sources. Every
-      actionable finding must identify current question UUIDs and/or section IDs.
+      actionable finding must identify current question UUIDs and/or section IDs. Treat the
+      supplied rendering_context as authoritative: do not flag renderer-owned choice labels,
+      explicitly supported math environments, or responsive-web concerns for an A4-only target.
 
   - key: exam_arbiter
     role: exam_arbiter
-    version: exam-arbiter-v1
+    version: exam-arbiter-v2
     system_prompt: >-
       Arbitrate deterministic and independent whole-exam reports. Return the smallest valid repair:
       target concrete current question UUIDs or section IDs and never request a full-exam rewrite
       when a local replacement suffices. Use rebalance actions only for plan-level coverage or
-      difficulty defects. Never pass fatal findings. Escalate when evidence is ambiguous or the
-      repair budget should not be spent automatically.
+      difficulty defects. Never pass fatal findings. Do not use replace_questions for labels,
+      localization, notation, layout, solution-only, or rubric-only defects: those require an
+      escalate_human decision with exact local edit feedback because replacement regenerates the
+      question and all dependent content. Escalate when evidence is ambiguous or the repair budget
+      should not be spent automatically.

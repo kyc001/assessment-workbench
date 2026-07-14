@@ -5,6 +5,7 @@ from uuid import UUID
 
 from assessment_workbench.domain import (
     DifficultyDistribution,
+    ExamArbitrationAction,
     ExamArbitrationDecision,
     ExamBlueprint,
     ExamBundleVersionSignature,
@@ -145,6 +146,18 @@ def validate_question_plan_coverage(
         raise ValueError(f"question plan coverage scores do not match blueprint: {mismatched}")
 
 
+def validate_question_plan_timing(
+    blueprint: ExamBlueprint,
+    plans: list[QuestionPlan],
+) -> None:
+    estimated_minutes = sum(plan.estimated_minutes for plan in plans)
+    if estimated_minutes > blueprint.duration_minutes:
+        raise ValueError(
+            f"question plan time is {estimated_minutes} minutes, above the "
+            f"{blueprint.duration_minutes}-minute limit"
+        )
+
+
 def deterministic_exam_review(
     profile: SubjectProfile,
     blueprint: ExamBlueprint,
@@ -249,7 +262,9 @@ def resolve_exam_targets(
     blueprint: ExamBlueprint,
 ) -> list[int]:
     question_number_by_id = {
-        bundle.question.id: bundle.question.number for bundle in exam.questions
+        question_id: bundle.question.number
+        for bundle in exam.questions
+        for question_id in (bundle.question.id, bundle.question.question_id)
     }
     unknown_question_ids = sorted(set(decision.question_ids) - set(question_number_by_id), key=str)
     if unknown_question_ids:
@@ -263,11 +278,12 @@ def resolve_exam_targets(
         raise ValueError(f"exam arbitration references unknown section ids: {unknown_section_ids}")
 
     numbers = {question_number_by_id[question_id] for question_id in decision.question_ids}
-    numbers.update(
-        bundle.question.number
-        for bundle in exam.questions
-        if bundle.question.section_id in decision.section_ids
-    )
+    if decision.action is ExamArbitrationAction.REGENERATE_SECTION or not numbers:
+        numbers.update(
+            bundle.question.number
+            for bundle in exam.questions
+            if bundle.question.section_id in decision.section_ids
+        )
     if not numbers:
         raise ValueError(f"exam arbitration action {decision.action.value} resolved no questions")
     return sorted(numbers)
@@ -278,13 +294,26 @@ def validate_exam_review_report(
     exam: ExamDocument,
     blueprint: ExamBlueprint,
 ) -> None:
-    question_ids = {bundle.question.id for bundle in exam.questions}
+    version_ids = {bundle.question.id for bundle in exam.questions}
+    version_id_by_stable_id = {
+        bundle.question.question_id: bundle.question.id for bundle in exam.questions
+    }
+    accepted_question_ids = version_ids | set(version_id_by_stable_id)
     section_ids = {section.id for section in blueprint.sections}
     has_blocking = False
     for finding in report.findings:
-        unknown_questions = sorted(set(finding.question_ids) - question_ids, key=str)
+        unknown_questions = sorted(
+            set(finding.question_ids) - accepted_question_ids,
+            key=str,
+        )
         if unknown_questions:
             raise ValueError(f"exam review references unknown question ids: {unknown_questions}")
+        finding.question_ids = list(
+            dict.fromkeys(
+                version_id_by_stable_id.get(question_id, question_id)
+                for question_id in finding.question_ids
+            )
+        )
         unknown_sections = sorted(set(finding.section_ids) - section_ids)
         if unknown_sections:
             raise ValueError(f"exam review references unknown section ids: {unknown_sections}")

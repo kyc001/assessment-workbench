@@ -129,6 +129,37 @@ class ExamReviewerRegistry:
         return tuple(sorted(self._definitions))
 
 
+@dataclass(frozen=True)
+class SubjectResearchDefinition:
+    name: str
+    prompt_key: str
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.prompt_key:
+            raise ValueError("subject research name and prompt key cannot be empty")
+
+
+class SubjectResearchRegistry:
+    def __init__(self, definitions: Iterable[SubjectResearchDefinition] = ()) -> None:
+        self._definitions: dict[str, SubjectResearchDefinition] = {}
+        for definition in definitions:
+            self.register(definition)
+
+    def register(self, definition: SubjectResearchDefinition) -> None:
+        if definition.name in self._definitions:
+            raise ValueError(f"subject research role is already registered: {definition.name}")
+        self._definitions[definition.name] = definition
+
+    def require(self, name: str) -> SubjectResearchDefinition:
+        try:
+            return self._definitions[name]
+        except KeyError as exc:
+            raise ValueError(f"subject research role is not registered: {name}") from exc
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._definitions))
+
+
 class ToolRegistry:
     def __init__(self, definitions: Iterable[ToolDefinition] = ()) -> None:
         self._definitions: dict[str, ToolDefinition] = {}
@@ -232,6 +263,7 @@ class CapabilityCatalog:
     prompts: PromptRegistry
     reviewers: ReviewerRegistry
     exam_reviewers: ExamReviewerRegistry
+    subject_researchers: SubjectResearchRegistry
     tools: ToolRegistry
     validators: ValidatorRegistry
     subjects: SubjectCapabilityRegistry
@@ -335,6 +367,16 @@ def load_default_capability_catalog(
     )
     for reviewer_name in exam_reviewers.names():
         prompt_registry.require(exam_reviewers.require(reviewer_name).prompt_key)
+    subject_researchers = SubjectResearchRegistry(
+        [
+            SubjectResearchDefinition("assessment_design", "subject_research_assessment"),
+            SubjectResearchDefinition("curriculum_scope", "subject_research_curriculum"),
+            SubjectResearchDefinition("quality_policy", "subject_research_quality"),
+        ]
+    )
+    for research_name in subject_researchers.names():
+        prompt_registry.require(subject_researchers.require(research_name).prompt_key)
+    prompt_registry.require("subject_research_synthesizer")
     prompt_registry.require("question_plan_reviser")
     prompt_registry.require("exam_arbiter")
     tools = ToolRegistry(
@@ -361,6 +403,7 @@ def load_default_capability_catalog(
         prompts=prompt_registry,
         reviewers=reviewers,
         exam_reviewers=exam_reviewers,
+        subject_researchers=subject_researchers,
         tools=tools,
         validators=validators,
         subjects=SubjectCapabilityRegistry(),

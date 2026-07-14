@@ -85,7 +85,7 @@ class QuestionAgentWorkflow:
         self.max_total_question_rounds = max_total_question_rounds
         self.max_draft_validation_attempts = max_draft_validation_attempts
         self.reviewer_workflow = ReviewerPoolWorkflow(
-            models.standard,
+            models.strong,
             artifacts,
             runs,
             capabilities,

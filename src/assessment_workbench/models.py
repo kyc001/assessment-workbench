@@ -131,28 +131,34 @@ class OpenAICompatibleModel:
             self._request_semaphore,
             httpx.AsyncClient(timeout=self.timeout) as client,
         ):
-            for attempt in range(3):
-                try:
-                    async with client.stream(
-                        "POST",
-                        f"{self.base_url}/chat/completions",
-                        headers={
-                            "Accept": "text/event-stream",
-                            "Authorization": f"Bearer {self.api_key}",
-                        },
-                        json=request,
-                    ) as response:
-                        response.raise_for_status()
-                        return await _read_response_payload(response)
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    if attempt == 2:
-                        raise RetryableWorkflowError(str(exc)) from exc
-                except httpx.HTTPStatusError as exc:
-                    if not is_retryable_http_status(exc.response.status_code):
-                        raise
-                    if attempt == 2:
-                        raise RetryableWorkflowError(str(exc)) from exc
-                await asyncio.sleep(0.5 * (2**attempt))
+            try:
+                async with asyncio.timeout(self.timeout):
+                    for attempt in range(3):
+                        try:
+                            async with client.stream(
+                                "POST",
+                                f"{self.base_url}/chat/completions",
+                                headers={
+                                    "Accept": "text/event-stream",
+                                    "Authorization": f"Bearer {self.api_key}",
+                                },
+                                json=request,
+                            ) as response:
+                                response.raise_for_status()
+                                return await _read_response_payload(response)
+                        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                            if attempt == 2:
+                                raise RetryableWorkflowError(str(exc)) from exc
+                        except httpx.HTTPStatusError as exc:
+                            if not is_retryable_http_status(exc.response.status_code):
+                                raise
+                            if attempt == 2:
+                                raise RetryableWorkflowError(str(exc)) from exc
+                        await asyncio.sleep(0.5 * (2**attempt))
+            except TimeoutError as exc:
+                raise RetryableWorkflowError(
+                    f"model request exceeded total timeout of {self.timeout:g} seconds"
+                ) from exc
         raise RuntimeError("model request retry loop exited unexpectedly")
 
 

@@ -305,6 +305,19 @@ class DifficultyDistribution(BaseModel):
         return self
 
 
+class CalculatorPolicy(StrEnum):
+    UNSPECIFIED = "unspecified"
+    PROHIBITED = "prohibited"
+    SCIENTIFIC_ALLOWED = "scientific_allowed"
+
+
+class DifficultyBasis(StrEnum):
+    UNSPECIFIED = "unspecified"
+    QUESTION_COUNT = "question_count"
+    SCORE = "score"
+    ESTIMATED_TIME = "estimated_time"
+
+
 class ExamBlueprint(BaseModel):
     id: str
     version: str = "1"
@@ -314,6 +327,8 @@ class ExamBlueprint(BaseModel):
     duration_minutes: int = Field(ge=1)
     total_score: int = Field(ge=1)
     language: str = "zh-CN"
+    calculator_policy: CalculatorPolicy = CalculatorPolicy.UNSPECIFIED
+    difficulty_basis: DifficultyBasis = DifficultyBasis.UNSPECIFIED
     sections: list[ExamSectionBlueprint] = Field(min_length=1)
     coverage: list[CoverageTarget] = Field(default_factory=list)
     difficulty_distribution: DifficultyDistribution
@@ -347,6 +362,7 @@ class ExamPlanningRecord(BaseModel):
     blueprint_version: str
     capability_id: str | None = None
     capability_version: str | None = None
+    research_synthesis_artifact_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_capability_pair(self) -> "ExamPlanningRecord":
@@ -528,6 +544,23 @@ class RubricVersion(BaseModel):
                 raise ValueError(f"rubric item {item.id} depends on an unknown item")
             if item.id in item.depends_on:
                 raise ValueError(f"rubric item {item.id} cannot depend on itself")
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(item_id: str) -> None:
+            if item_id in visiting:
+                raise ValueError("rubric item dependencies must be acyclic")
+            if item_id in visited:
+                return
+            visiting.add(item_id)
+            item = next(candidate for candidate in self.items if candidate.id == item_id)
+            for dependency in item.depends_on:
+                visit(dependency)
+            visiting.remove(item_id)
+            visited.add(item_id)
+
+        for item_id in item_ids:
+            visit(item_id)
         return self
 
 
@@ -557,6 +590,7 @@ class ExamDocument(BaseModel):
     duration_minutes: int = Field(ge=1)
     total_score: int = Field(ge=1)
     language: str = "zh-CN"
+    calculator_policy: CalculatorPolicy = CalculatorPolicy.UNSPECIFIED
     questions: list[ExamQuestionBundle] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -610,6 +644,126 @@ class BlueprintDraft(StrictModel):
     coverage: list[CoverageTarget] = Field(default_factory=list)
     difficulty_distribution: DifficultyDistribution
     constraints: list[str] = Field(default_factory=list)
+
+
+class ResearchEvidence(StrictModel):
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    publisher: str = Field(min_length=1)
+    url_or_document_id: str = Field(min_length=1)
+    locator: str = ""
+    excerpt: str = Field(min_length=1)
+    authority: str = Field(min_length=1)
+    directness: str = Field(min_length=1)
+    retrieved_at: str = Field(min_length=1)
+
+
+class ResearchClaim(StrictModel):
+    id: str = Field(min_length=1)
+    category: str = Field(min_length=1)
+    statement: str = Field(min_length=1)
+    proposed_value: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+    assumption: bool = False
+    confidence: str = Field(min_length=1)
+    confidence_rationale: str = Field(min_length=1)
+
+
+class ResearchTopic(StrictModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    prerequisites: list[str] = Field(default_factory=list)
+    included: bool
+    exclusion_reason: str | None = None
+
+
+class AssessmentDesignCandidate(StrictModel):
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    audience: str = Field(min_length=1)
+    assessment_purpose: str = Field(min_length=1)
+    duration_minutes: int = Field(ge=1)
+    total_score: int = Field(ge=1)
+    sections: list[ExamSectionBlueprint] = Field(min_length=1)
+    coverage: list[CoverageTarget] = Field(min_length=1)
+    difficulty_distribution: DifficultyDistribution
+    constraints: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class ResearchConflict(StrictModel):
+    id: str = Field(min_length=1)
+    field_path: str = Field(min_length=1)
+    competing_claim_ids: list[str] = Field(min_length=2)
+    rationale: str = Field(min_length=1)
+    requires_human: bool = True
+
+
+class SubjectResearchReport(StrictModel):
+    research_role: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    audience_candidates: list[str] = Field(min_length=1)
+    course_variant_candidates: list[str] = Field(min_length=1)
+    prerequisites: list[str] = Field(default_factory=list)
+    topics: list[ResearchTopic] = Field(default_factory=list)
+    claims: list[ResearchClaim] = Field(min_length=1)
+    evidence: list[ResearchEvidence] = Field(min_length=1)
+    assessment_design_candidates: list[AssessmentDesignCandidate] = Field(default_factory=list)
+    quality_rules: list[str] = Field(default_factory=list)
+    conflicts: list[ResearchConflict] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "SubjectResearchReport":
+        evidence_ids = {item.id for item in self.evidence}
+        claim_ids = {item.id for item in self.claims}
+        if len(evidence_ids) != len(self.evidence) or len(claim_ids) != len(self.claims):
+            raise ValueError("research evidence and claim ids must be unique")
+        for claim in self.claims:
+            if not set(claim.evidence_ids) <= evidence_ids:
+                raise ValueError(f"research claim {claim.id} references unknown evidence")
+            if not claim.evidence_ids and not claim.assumption:
+                raise ValueError(f"research claim {claim.id} requires evidence or assumption=true")
+        for conflict in self.conflicts:
+            if not set(conflict.competing_claim_ids) <= claim_ids:
+                raise ValueError(f"research conflict {conflict.id} references unknown claims")
+        return self
+
+
+class ResearchFieldTrace(StrictModel):
+    target_path: str = Field(min_length=1)
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    decision_type: str = Field(min_length=1)
+    decision_rationale: str = Field(min_length=1)
+
+
+class SubjectResearchSynthesis(StrictModel):
+    selected_course_variant: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    successful_research_run_ids: list[UUID] = Field(default_factory=list)
+    failed_research_run_ids: list[UUID] = Field(default_factory=list)
+    adopted_claim_ids: list[str] = Field(min_length=1)
+    rejected_claim_ids: list[str] = Field(default_factory=list)
+    unresolved_conflict_ids: list[str] = Field(default_factory=list)
+    field_traces: list[ResearchFieldTrace] = Field(min_length=1)
+    profile: SubjectProfileCandidate
+    blueprint: BlueprintDraft
+    human_confirmation_required: bool = True
+
+
+class SubjectResearchRequest(StrictModel):
+    research_role: str = Field(min_length=1)
+    subject: str = Field(min_length=1)
+    target_level: str = Field(min_length=1)
+    requirements: str
+    source_context: str = ""
+    parent_run_id: UUID
+    attempt: int = Field(ge=1)
+    input_signature: str = Field(min_length=64, max_length=64)
+    input_artifact_ids: list[UUID] = Field(default_factory=list)
 
 
 class QuestionDraft(StrictModel):
@@ -736,6 +890,30 @@ class ReviewReport(StrictModel):
     findings: list[ReviewFinding] = Field(default_factory=list)
     summary: str = ""
 
+    @model_validator(mode="after")
+    def validate_finding_consistency(self) -> "ReviewReport":
+        blocking = [
+            finding
+            for finding in self.findings
+            if finding.severity in {FindingSeverity.ERROR, FindingSeverity.FATAL}
+        ]
+        if self.passed and blocking:
+            raise ValueError("passed review report cannot contain error or fatal findings")
+        if not self.passed and not blocking:
+            raise ValueError("failed review report requires an error or fatal finding")
+        for finding in blocking:
+            message = finding.message.casefold()
+            action = finding.suggested_action.strip().casefold()
+            if finding.severity is FindingSeverity.FATAL and (
+                "no fatal" in message
+                or action in {"no action", "no action needed", "none"}
+                or action.startswith("no action needed")
+            ):
+                raise ValueError(
+                    f"fatal review finding {finding.code} contradicts its message or action"
+                )
+        return self
+
 
 class ExamReviewTarget(StrEnum):
     EXAM = "exam"
@@ -788,6 +966,7 @@ class ExamReviewRequest(StrictModel):
     parent_run_id: UUID
     attempt: int = Field(ge=1)
     capability_context: dict[str, list[str]] = Field(default_factory=dict)
+    rendering_context: dict[str, str] = Field(default_factory=dict)
     input_artifact_ids: list[UUID] = Field(default_factory=list)
 
 
@@ -992,6 +1171,22 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+
+
+class SubjectResearchRunRecord(StrictModel):
+    research_role: str = Field(min_length=1)
+    attempt: int = Field(ge=1)
+    run_id: UUID
+    status: RunStatus
+    input_signature: str = Field(min_length=64, max_length=64)
+    report_artifact_id: UUID | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_report_binding(self) -> "SubjectResearchRunRecord":
+        if self.status is RunStatus.SUCCEEDED and self.report_artifact_id is None:
+            raise ValueError("succeeded subject research run requires a report artifact")
+        return self
 
 
 class ReviewerRunRecord(StrictModel):

@@ -19,7 +19,9 @@
 - 可选 OpenAI-compatible 语义知识抽取，严格使用 JSON Schema 输出
 - 模型调用绑定版本化 ContextPack，记录 Prompt/Schema/请求序列哈希、token 和错误
 - 版本化 Prompt Registry 与科目能力包，已注册科目可锁定结构，未知科目由 Agent 动态规划
+- 未知科目由课程范围、施测设计和质量政策研究 child 独立并行调研，成功结果即时落盘并可恢复
 - 单题 Writer/Solver/Rubric 阶段可恢复，Reviewer 独立并行运行并只重试失败项
+- 每题独立 child 并行生成、即时写入 editable Bundle，可单题重跑或版本化人工修改
 - 整卷审核绑定全部题目版本，仲裁只重跑命中的题目或分区并保留替换历史
 - 题目卷、答案卷和 Rubric 独立编译、全页检查并只重试失败视图
 - 发布 Bundle 绑定内容、模型审计、审核仲裁、PDF、日志、页面图片和人工验收
@@ -143,10 +145,14 @@ uv run assessment-workbench materials ingest lecture.pdf \
 AW_LLM_BASE_URL=https://api.openai.com/v1
 AW_LLM_API_KEY=...
 AW_LLM_MODEL=gpt-5.6-luna
-AW_LLM_STRONG_MODEL=gpt-5.6-luna
+AW_LLM_STRONG_MODEL=gpt-5.6-terra
 AW_LLM_REQUEST_CONCURRENCY=6
-AW_EXAM_QUESTION_CONCURRENCY=3
+AW_EXAM_QUESTION_CONCURRENCY=18
 ```
+
+默认模型分层中，Luna 承担高并发题干和 Rubric 生成，Terra 承担未知科目研究与综合、整卷规划、
+独立解题、Reviewer 和 Arbiter。模型档位可以通过环境变量替换，但结构校验、恢复、隔离、落盘和
+PDF 门禁始终由框架确定性执行。
 
 抽取结果必须引用 MinerU 内容块 ID；没有证据的节点和关系不会入库。
 

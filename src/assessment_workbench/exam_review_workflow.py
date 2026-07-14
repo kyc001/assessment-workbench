@@ -21,6 +21,7 @@ from assessment_workbench.domain import (
     WorkflowRun,
 )
 from assessment_workbench.exam_quality import exam_bundle_signature, validate_exam_review_report
+from assessment_workbench.latex import GENERIC_LATEX_REVIEW_CONTEXT
 from assessment_workbench.ports import StructuredModel
 from assessment_workbench.prompting import (
     complete_with_prompt,
@@ -120,6 +121,7 @@ class ExamReviewerPoolWorkflow:
                     plans=plans,
                     exam=exam,
                     capability_context=capability_context,
+                    rendering_context=GENERIC_LATEX_REVIEW_CONTEXT,
                     parent_run_id=parent_run_id,
                     attempt=attempt,
                     input_artifact_ids=input_artifact_ids,
@@ -244,6 +246,7 @@ class ExamReviewerPoolWorkflow:
                     question_plans=[plan.model_dump(mode="json") for plan in request.plans],
                     exam=request.exam.model_dump(mode="json"),
                     capability_context=request.capability_context,
+                    rendering_context=request.rendering_context,
                 ),
                 response_model=ExamReviewReport,
                 run_id=state["run_id"],

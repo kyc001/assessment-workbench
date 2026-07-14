@@ -20,6 +20,7 @@ from assessment_workbench.exam_quality import (
     merge_revised_question_plans,
     resolve_exam_targets,
     validate_question_plan_coverage,
+    validate_question_plan_timing,
 )
 from assessment_workbench.exam_review_workflow import (
     ExamReviewerExhaustedError,
@@ -61,7 +62,7 @@ class ExamQualityWorkflow:
         self.max_review_rounds = max_review_rounds
         self.max_draft_validation_attempts = max_draft_validation_attempts
         self.reviewers = ExamReviewerPoolWorkflow(
-            standard_model,
+            strong_model,
             artifacts,
             runs,
             capabilities,
@@ -114,6 +115,7 @@ class ExamQualityWorkflow:
             try:
                 revised = merge_revised_question_plans(current, target_ids, draft.plans)
                 validate_question_plan_coverage(blueprint, revised)
+                validate_question_plan_timing(blueprint, revised)
                 break
             except ValueError as exc:
                 if validation_attempt == self.max_draft_validation_attempts - 1:
@@ -307,17 +309,44 @@ class ExamQualityWorkflow:
         decision: ExamArbitrationDecision,
         reports: list[ExamReviewReport],
     ) -> ExamArbitrationDecision:
-        if decision.action not in {
-            ExamArbitrationAction.PASS,
-            ExamArbitrationAction.PASS_WITH_WARNINGS,
-        }:
-            return decision
         blocking = [
             finding
             for report in reports
             for finding in report.findings
             if finding.severity in {FindingSeverity.ERROR, FindingSeverity.FATAL}
         ]
+        if not blocking and all(report.passed for report in reports):
+            if decision.action in {
+                ExamArbitrationAction.PASS,
+                ExamArbitrationAction.PASS_WITH_WARNINGS,
+            }:
+                return decision
+            warnings = [
+                finding
+                for report in reports
+                for finding in report.findings
+                if finding.severity is FindingSeverity.WARNING
+            ]
+            return ExamArbitrationDecision(
+                action=(
+                    ExamArbitrationAction.PASS_WITH_WARNINGS
+                    if warnings
+                    else ExamArbitrationAction.PASS
+                ),
+                rationale=(
+                    "All deterministic and independent exam reviews passed without error or "
+                    "fatal findings. Non-blocking findings remain advisory and cannot trigger "
+                    "automatic regeneration or escalation."
+                ),
+                finding_codes=[finding.code for finding in warnings],
+                plan_feedback=[finding.message for finding in warnings if not finding.question_ids],
+                question_feedback=[finding.message for finding in warnings if finding.question_ids],
+            )
+        if decision.action not in {
+            ExamArbitrationAction.PASS,
+            ExamArbitrationAction.PASS_WITH_WARNINGS,
+        }:
+            return decision
         if not blocking:
             return decision
         question_ids = list(

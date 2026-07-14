@@ -19,6 +19,13 @@ CLI
       -> optional semantic extraction
       -> LocalKnowledgeBackend
       -> ArtifactStore
+  -> ExamAgentWorkflow
+      -> capability resolution
+      -> dynamic subject research pool or locked subject capability
+      -> SubjectProfile / ExamBlueprint approval
+      -> parallel per-question child runs
+      -> whole-exam review and local arbitration
+      -> three-view document build and release bundle
   -> SQLite RunStore / PhaseEvent
 ```
 
@@ -65,6 +72,12 @@ JSON 读取。
 
 逐题、Reviewer、Arbiter 和整卷规划调用在 HTTP 请求前写 `model-context.json`。ContextPack 保存精确结构化 user payload，并绑定当时输入 Artifact 的 run ID、artifact ID、logical name、version 和 SHA-256。它不包含 API Key、Authorization Header 或环境变量；课程上下文仍可能敏感，因此 ContextPack 只属于本地 workspace，不提交到 Git。
 
+模型按任务风险分层，而不是全链路无差别使用同一档模型。默认 `AW_LLM_MODEL=gpt-5.6-luna`
+负责题干和 Rubric 等高并发生成；默认 `AW_LLM_STRONG_MODEL=gpt-5.6-terra` 负责未知科目研究与
+综合、整卷规划、独立解题、Reviewer 和 Arbiter。模型升级只用于需要更强推理的阶段；并发隔离、
+恢复、Artifact 提交、Schema 校验、确定性约束和 PDF 门禁仍由运行框架负责，不能用更强模型掩盖
+框架缺陷。
+
 知识抽取只有引用现有 `source_block_ids` 的节点和关系才会物化到课程图谱。
 
 ## Prompt 与科目能力注册表
@@ -77,6 +90,7 @@ PromptRegistry
 
 CapabilityCatalog
   -> ReviewerRegistry
+  -> SubjectResearchRegistry
   -> ToolRegistry
   -> ValidatorRegistry
   -> SubjectCapabilityRegistry
@@ -87,6 +101,22 @@ CapabilityCatalog
 明确的 `高考数学` 请求会解析到内置能力包，锁定 19 题、150 分、120 分钟及 8 道单选、3 道多选、3 道填空、5 道解答题的结构。能力包只保存结构和行为规则，不保存题目、答案或 Rubric。未命中能力包的科目仍由 Subject Research Agent 和 Blueprint Agent 动态生成结构，再通过相同 Registry 校验。
 
 解析优先级为：显式 Profile/Blueprint > 内置 Subject Capability > Agent 动态研究。能力包 ID/版本写入规划 Artifact，Prompt 版本写入每次模型调用和题目版本元数据。
+
+## 未知科目动态研究与施测政策
+
+未注册科目不会回退到静态题库或相邻科目模板。父运行创建三个职责独立的
+`subject_research` child：课程范围、施测设计和质量政策。每个 child 使用自己的 Prompt、run、
+checkpoint 和 `subject-research-report.json`，创建与完成时都立即刷新父级
+`subject-research-runs.json`。一个角色失败不会取消其他角色；恢复时按输入签名复用成功报告，
+只重跑缺失或失败的角色。达到 quorum 后，综合 Agent 生成可追溯的
+`SubjectResearchSynthesis`，每个 Profile/Blueprint 字段通过 `ResearchFieldTrace` 引用采用的 claim
+和 evidence。
+
+综合结果必须先结构化为 `SubjectProfile` 和 `ExamBlueprint`，不能把研究自由文本直接传给
+Writer。Blueprint 显式保存 `calculator_policy` 和 `difficulty_basis`；题型、题数、分值、时长、
+coverage、难度分布和质量规则在人工确认后成为下游锁定合同。CLI 可以通过版本化操作修改标题、
+计算器政策、难度统计口径或局部 QuestionPlan，但每次修改都创建新 Artifact，并使用 compare-and-
+swap checkpoint override 防止覆盖并发更新。
 
 ## 单题阶段与 Reviewer 隔离
 
@@ -104,6 +134,11 @@ QUESTION_INITIALIZING
 ```
 
 Writer、Solver 和 Rubric 每个阶段完成后立即写不可变 Artifact 和 checkpoint。`WorkflowEngine` 的命名阶段跳转由 Arbiter 决策驱动，PhaseEvent `round` 记录重复进入次数；恢复时从最后一个已完成阶段继续，不重复调用上游模型。
+
+题目 child 按 `AW_EXAM_QUESTION_CONCURRENCY` 有界并行，默认允许整份 18 题动态试卷同时排队；
+共享 `AW_LLM_REQUEST_CONCURRENCY` 继续限制实际在途模型请求。child 创建、成功或失败都会立即更新
+父级实时投影；成功 Bundle 同时写入 `editable/<parent-run>/questions/NN.json`，因此不需要等待最慢
+题目即可查看、编辑或单题重跑。
 
 每个 Reviewer 使用独立 `question_review` grandchild run。Reviewer 同批并行执行，报告完成后立即写自己的 Artifact，并更新问题级 `review-runs.json` 实时投影和不可变快照。Manifest 绑定 Question、Solution、Rubric 的具体 version ID；只有输入版本完全一致的成功报告可以复用，单个 Reviewer 失败只重试该 Reviewer。
 
@@ -134,6 +169,11 @@ slot 与 coverage 校验；无效草稿、校验错误、反馈和下一 attempt
 
 `REBALANCE_DIFFICULTY` 和 `REBALANCE_COVERAGE` 先只修订目标 QuestionPlan，再进入相同的局部题目生成路径。合并器要求返回的 slot 集合与目标完全一致，非目标计划保持不变。整卷重试预算耗尽或 Reviewer 无法完成时保留最新 Exam 和审核 Artifact，并进入人工审批。
 
+仲裁之前有确定性审核护栏：只要任一 Reviewer 含 `error/fatal` 或 `passed=false`，就不能接受
+`PASS`；反之，当全部 Reviewer `passed=true` 且没有 `error/fatal` 时，模型也不能因为 advisory
+warning 触发重写、重规划或人工升级，只能得到 `PASS` 或 `PASS_WITH_WARNINGS`。这避免非阻断建议
+演化成无限返工。
+
 ## 文档构建、页面门禁与发布
 
 `ExamDocument` 和逐题 Bundle 是内容事实来源，LaTeX、PDF、日志和页面图片都是可重建产物。题目卷、答案卷和评分标准不再由一个同步导出循环处理，而是分别运行独立 `exam_document_build` child：
@@ -149,10 +189,11 @@ DOCUMENTS_BUILDING
 
 每个 child 先提交已校验 TeX，再调用 Tectonic。编译失败仍保存 TeX 和失败日志；兄弟视图继续执行。父运行的 `document-build-runs.json` 同时维护 editable 实时投影和不可变快照，输入签名一致且 Artifact 完整的成功视图在恢复时复用，只重跑失败、缺失或过期视图。
 
-Renderer 会把文本之间的短 `display_math` 降级为行内数学，避免模型把单个变量切成居中段落；常见
-伪 LaTeX（`sqrt(...)`、`degrees`、`in {..}`、操作数间 `*`、`<=`/`>=` 等）在安全校验后统一
-规范化。数学归一化不能改写 `\mathbb N^*` 等合法记号，Tectonic 日志中的缺字、overfull 和
-underfull 仍是阻断错误，不能通过放宽门禁掩盖。
+`generic-v3` Renderer 会把文本之间的短 `display_math` 降级为行内数学，避免模型把单个变量切成
+居中段落；常见伪 LaTeX（`sqrt(...)`、`degrees`、`in {..}`、操作数间 `*`、`<=`/`>=`）、Unicode
+数学符号、文本下标、单位幂和数学块中的自然语言连接词在安全校验后统一规范化。长推导可使用
+`aligned` 显式换行。数学归一化不能改写 `\mathbb N^*` 等合法记号，Tectonic 日志中的缺字、
+Fontconfig、overfull 和 underfull 仍是阻断错误，不能通过放宽门禁掩盖。
 
 Poppler Inspector 使用 `pdfinfo`、`pdftotext` 和 `pdftoppm` 检查页数、A4 尺寸、文本层、连续题号、分区与视图专属标签，并把全部页面写成 PNG Artifact。灰度页只用于发现空白页和内容贴边风险。机器报告明确保留重叠、公式可读性、内容与推导正确性等人工检查项；启用 human gates 时，全部页面批准后才写 `document-acceptance.json`。
 
@@ -180,13 +221,10 @@ WorkflowEngine 通过 `RunStore.commit_phase` 在一个 SQLite 事务内提交 c
 ## 下一条垂直切片
 
 ```text
-知识点标签
-  -> 证据检索
-  -> QuestionSpec
-  -> Question Writer
-  -> Independent Solver
-  -> Rubric Builder
-  -> Reviewer Pool
-  -> Arbiter
-  -> 版本化产物
+轻量本地控制台
+  -> 运行时间线和研究/题目实时 manifest
+  -> Blueprint 与单题结构化编辑
+  -> 单题重跑、局部重审和版本对比
+  -> 内置 PDF 查看与人工页面验收
+  -> 调用现有领域服务和工作流内核，不复制业务逻辑
 ```
