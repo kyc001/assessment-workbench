@@ -23,6 +23,8 @@ def is_retryable_failure(error_code: str | None, error: str | None) -> bool:
         "ReadTimeout",
         "WriteTimeout",
         "PoolTimeout",
+        "ProtocolError",
+        "RemoteProtocolError",
     }:
         return True
     if error_code != "HTTPStatusError" or error is None:

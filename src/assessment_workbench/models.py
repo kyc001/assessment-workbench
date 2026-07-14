@@ -146,7 +146,11 @@ class OpenAICompatibleModel:
                             ) as response:
                                 response.raise_for_status()
                                 return await _read_response_payload(response)
-                        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                        except (
+                            httpx.TimeoutException,
+                            httpx.NetworkError,
+                            httpx.RemoteProtocolError,
+                        ) as exc:
                             if attempt == 2:
                                 raise RetryableWorkflowError(str(exc)) from exc
                         except httpx.HTTPStatusError as exc:

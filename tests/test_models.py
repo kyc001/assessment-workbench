@@ -1,10 +1,12 @@
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 from pydantic import BaseModel
 
 from assessment_workbench.domain import ContextPack, ModelCall
+from assessment_workbench.errors import RetryableWorkflowError
 from assessment_workbench.model_contracts import canonical_json_sha256, strict_json_schema
 from assessment_workbench.models import OpenAICompatibleModel, _strict_schema
 from assessment_workbench.prompting import PromptBundle, complete_with_prompt, json_prompt
@@ -174,6 +176,68 @@ async def test_model_repair_is_a_single_audited_call(tmp_path: Path) -> None:
     assert len(call.request_sha256_sequence) == 2
     assert call.request_sha256_sequence[0] == call.request_sha256
     assert call.provider_request_id == "repaired-response"
+
+
+@respx.mock
+async def test_remote_protocol_error_retries_then_interrupts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    route = respx.post("https://model.test/v1/chat/completions").mock(
+        side_effect=httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    )
+    model = OpenAICompatibleModel(
+        base_url="https://model.test/v1",
+        api_key="secret",
+        model="test-model",
+        audit_store=LocalKnowledgeBackend(workspace),
+    )
+
+    async def skip_backoff(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("assessment_workbench.models.asyncio.sleep", skip_backoff)
+
+    with pytest.raises(RetryableWorkflowError, match="Server disconnected"):
+        await model.complete(
+            role="test",
+            system_prompt="system",
+            user_prompt="user",
+            response_model=Answer,
+            prompt_version="v1",
+        )
+
+    assert route.call_count == 3
+    call = _stored_model_call(workspace)
+    assert call.status == "failed"
+    assert call.error == "Server disconnected without sending a response."
+
+
+@respx.mock
+async def test_local_protocol_error_is_not_retried(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    route = respx.post("https://model.test/v1/chat/completions").mock(
+        side_effect=httpx.LocalProtocolError("invalid client protocol state")
+    )
+    model = OpenAICompatibleModel(
+        base_url="https://model.test/v1",
+        api_key="secret",
+        model="test-model",
+        audit_store=LocalKnowledgeBackend(workspace),
+    )
+
+    with pytest.raises(httpx.LocalProtocolError, match="invalid client protocol state"):
+        await model.complete(
+            role="test",
+            system_prompt="system",
+            user_prompt="user",
+            response_model=Answer,
+            prompt_version="v1",
+        )
+
+    assert route.call_count == 1
 
 
 def test_strict_schema_requires_defaulted_properties_recursively() -> None:

@@ -344,3 +344,64 @@ def test_live_runner_is_not_recovered(tmp_path: Path) -> None:
     stored = store.get(run.id)
     assert stored is not None
     assert stored.status is RunStatus.RUNNING
+
+
+@pytest.mark.parametrize("error_code", ["ProtocolError", "RemoteProtocolError"])
+def test_failed_protocol_error_run_is_audited_before_retry(tmp_path: Path, error_code: str) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    run = store.create("protocol-recovery")
+    store.transition(run, RunStatus.RUNNING, current_phase="SUBJECT_SYNTHESIZING")
+    store.save_checkpoint(
+        WorkflowCheckpoint(run_id=run.id, workflow=run.workflow, next_step_index=1)
+    )
+    store.append_event(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="SUBJECT_SYNTHESIZING",
+            status=PhaseStatus.FAILED,
+            occurrence_id=uuid4(),
+            started_at=now_utc(),
+            completed_at=now_utc(),
+            error_code=error_code,
+            error="Server disconnected without sending a response.",
+        )
+    )
+    store.transition(run, RunStatus.FAILED, error="Server disconnected")
+
+    recovered = store.retry_failed(run.id, actor="test", reason="retry protocol disconnect")
+
+    assert recovered.status is RunStatus.INTERRUPTED
+    recovery_event = store.events(run.id)[-1]
+    assert recovery_event.phase == "RUN_RECOVERY"
+    assert recovery_event.error_details["failed_error_code"] == error_code
+
+
+def test_failed_value_error_run_remains_non_retryable(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    store = RunStore(workspace)
+    run = store.create("permanent-failure")
+    store.transition(run, RunStatus.RUNNING, current_phase="SUBJECT_SYNTHESIZING")
+    store.save_checkpoint(
+        WorkflowCheckpoint(run_id=run.id, workflow=run.workflow, next_step_index=1)
+    )
+    store.append_event(
+        PhaseEvent(
+            run_id=run.id,
+            workflow=run.workflow,
+            phase="SUBJECT_SYNTHESIZING",
+            status=PhaseStatus.FAILED,
+            occurrence_id=uuid4(),
+            started_at=now_utc(),
+            completed_at=now_utc(),
+            error_code="ValueError",
+            error="invalid synthesis",
+        )
+    )
+    store.transition(run, RunStatus.FAILED, error="invalid synthesis")
+
+    with pytest.raises(ValueError, match="not retryable"):
+        store.retry_failed(run.id, actor="test", reason="should remain failed")
