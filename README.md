@@ -624,6 +624,7 @@ src/assessment_workbench/
   exam_review_workflow.py      isolated whole-exam reviewer children
   exam_workflow.py             exam-level review gates and targeted repair routing
   document_workflow.py         LaTeX, PDF compilation, inspection, page Artifacts
+  benchmarking.py              oracle labels, controlled attacks, verifier metrics
   storage.py                   SQLite RunStore and filesystem ArtifactStore
   web_api.py                   typed local HTTP and SSE interface
 
@@ -638,6 +639,55 @@ Further reading:
 - [Architecture notes](docs/architecture.md)
 - [Gaokao demo](examples/gaokao-mathematics/README.md)
 - [Implementation status](docs/IMPLEMENTATION_PLAN.md)
+
+## Verifier Benchmark Workflow
+
+The repository now includes an offline benchmark layer for testing whether a verifier rejects semantically invalid `QuestionVersion` / `SolutionVersion` / `RubricVersion` bundles. Benchmark labels are independent of the verifier under test:
+
+- `BenchmarkCase` stores an immutable bundle, an Oracle verdict, error targets, error codes, evidence references, and clean/attack lineage.
+- `VerifierObservation` binds one `ReviewReport` to the exact question, solution, and rubric version IDs that it evaluated.
+- `rubric_loophole` is the first implemented controlled mutation. It preserves the clean question and solution, versions only the rubric, and inserts a structurally valid rule that awards full credit for a keyword match.
+- The remaining attack families are typed benchmark contracts and research targets; they are not yet implemented generators.
+
+Generate a paired clean/attack dataset:
+
+```bash
+uv run assessment-workbench benchmark attack-rubric \
+  --cases benchmark/clean.jsonl \
+  --output benchmark/rubric-loophole.jsonl
+```
+
+Evaluate one verifier from offline observations:
+
+```bash
+uv run assessment-workbench benchmark evaluate \
+  --cases benchmark/rubric-loophole.jsonl \
+  --observations benchmark/observations.jsonl \
+  --verifier specialized_ensemble \
+  --output benchmark/specialized-ensemble.json
+```
+
+Measure whether ensemble disagreement separates Oracle-invalid attacks from clean cases:
+
+```bash
+uv run assessment-workbench benchmark disagreement \
+  --cases benchmark/rubric-loophole.jsonl \
+  --observations benchmark/observations.jsonl \
+  --verifier solvability \
+  --verifier rubric_consistency \
+  --verifier structure \
+  --output benchmark/disagreement.json
+```
+
+| Metric | Definition |
+| --- | --- |
+| Precision / recall / F1 | invalid-bundle detection is the positive class |
+| Attack success rate | Oracle-invalid cases accepted by the verifier / all attack cases |
+| Clean acceptance rate | Oracle-valid cases accepted by the verifier / all clean cases |
+| Case disagreement | `2 * min(accept_votes, reject_votes) / verifier_count` |
+| Disagreement AUROC | pairwise AUROC for disagreement as a predictor of Oracle-invalid cases; tied scores receive 0.5 credit |
+
+Readers reject missing observations, duplicate IDs, unknown case references, incomplete case-by-verifier matrices, and content-version mismatches. This makes the metrics replayable against frozen artifacts instead of silently scoring a different bundle revision.
 
 ## Reward-Hacking Threat Model
 

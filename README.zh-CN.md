@@ -624,6 +624,7 @@ src/assessment_workbench/
   exam_review_workflow.py      隔离的整卷 Reviewer child
   exam_workflow.py             整卷审核门禁与定向修复路由
   document_workflow.py         LaTeX、PDF 编译、检查、页面 Artifact
+  benchmarking.py              Oracle 标签、受控攻击与 Verifier 指标
   storage.py                   SQLite RunStore 与文件系统 ArtifactStore
   web_api.py                   类型化本地 HTTP 与 SSE 接口
 
@@ -638,6 +639,55 @@ docs/                          架构与实现说明
 - [架构说明](docs/architecture.md)
 - [高考数学 Demo](examples/gaokao-mathematics/README.md)
 - [实现状态](docs/IMPLEMENTATION_PLAN.md)
+
+## Verifier Benchmark 工作流
+
+仓库现在包含一套离线 Benchmark 层，用于测试 Verifier 能否拒绝语义无效的 `QuestionVersion` / `SolutionVersion` / `RubricVersion` Bundle。Benchmark 标签独立于被测 Verifier：
+
+- `BenchmarkCase` 保存不可变 Bundle、Oracle verdict、错误目标、错误代码、证据引用以及 clean/attack lineage。
+- `VerifierObservation` 将一份 `ReviewReport` 绑定到它实际评测的精确 Question、Solution 和 Rubric 版本 ID。
+- `rubric_loophole` 是第一个已实现的受控变异。它保留干净的 Question 和 Solution，只对 Rubric 产生新版本，并插入一条结构合法、但仅匹配关键词就给满分的规则。
+- 其余攻击类别目前是类型化 Benchmark contract 和研究目标，尚未实现对应生成器。
+
+生成配对的 clean/attack 数据集：
+
+```bash
+uv run assessment-workbench benchmark attack-rubric \
+  --cases benchmark/clean.jsonl \
+  --output benchmark/rubric-loophole.jsonl
+```
+
+使用离线 Observation 评估单个 Verifier：
+
+```bash
+uv run assessment-workbench benchmark evaluate \
+  --cases benchmark/rubric-loophole.jsonl \
+  --observations benchmark/observations.jsonl \
+  --verifier specialized_ensemble \
+  --output benchmark/specialized-ensemble.json
+```
+
+测量 ensemble disagreement 能否区分 Oracle-invalid attack 与 clean case：
+
+```bash
+uv run assessment-workbench benchmark disagreement \
+  --cases benchmark/rubric-loophole.jsonl \
+  --observations benchmark/observations.jsonl \
+  --verifier solvability \
+  --verifier rubric_consistency \
+  --verifier structure \
+  --output benchmark/disagreement.json
+```
+
+| 指标 | 定义 |
+| --- | --- |
+| Precision / Recall / F1 | 将无效 Bundle 检测视为正类 |
+| Attack Success Rate | 被 Verifier 接受的 Oracle-invalid case / 全部 attack case |
+| Clean Acceptance Rate | 被 Verifier 接受的 Oracle-valid case / 全部 clean case |
+| Case Disagreement | `2 * min(accept_votes, reject_votes) / verifier_count` |
+| Disagreement AUROC | 以 disagreement 预测 Oracle-invalid case 的成对 AUROC；分数相同时计 0.5 |
+
+读取器会拒绝 Observation 缺失、ID 重复、未知 case 引用、不完整的 case × verifier 矩阵以及内容版本不匹配。这样，指标可以针对冻结 Artifact 重放，而不会静默评测另一个 Bundle 修订版本。
 
 ## Reward-Hacking 威胁模型
 
