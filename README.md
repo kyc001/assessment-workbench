@@ -15,7 +15,7 @@ Assessment Workbench 研究一个实际的系统问题：**如何让多智能体
 
 当前项目最准确的定位是：**面向未来 RLVR 与 Agentic RL 实验的评测、反馈和轨迹基础设施**。项目尚未训练策略、优化 Reward Model，也不声称已经通过实验降低 Reward Hacking。
 
-## Verifier-Centric 研究定位
+## 以验证器为中心的研究定位
 
 ```mermaid
 flowchart LR
@@ -50,6 +50,43 @@ flowchart LR
 - **可重放轨迹：** 精确输入、输出、版本、模型调用元数据、状态迁移和恢复事件；
 - **反事实修复点：** Problem、Solution、Rubric、QuestionPlan、Section 或整条运行边界。
 
+## 公开过程评测：ProcessBench
+
+高考题可以证明系统能够完成真实的多智能体生成与发布链路，但它不是标准化研究 Benchmark。为了评测 Verifier 是否真正理解推理过程，仓库现已接入 [ProcessBench](https://huggingface.co/datasets/Qwen/ProcessBench)：一个采用 Apache-2.0 许可证、要求定位数学解答中**第一处错误步骤**的公开基准。
+
+ProcessBench 比单纯的答案正确率更贴近本项目的研究问题：模型必须区分“整条过程正确”“中途出错导致最终答案错误”和“中途出错但最终答案碰巧正确”。最后一类正是过程奖励容易被投机利用的位置。
+
+首个已提交 pilot 从 ProcessBench 的 GSM8K split 中选择 24 条诊断 case，并使用 `gemini-3.5-flash` 在看不到 Oracle 标签的条件下进行一次 temperature-zero 评测：
+
+| 公开 Benchmark 指标 | Gemini Flash 实际结果 |
+| --- | ---: |
+| 第一处错误精确匹配 | **20 / 24 = 83.3%** |
+| 错误过程检出率 | **11 / 15 = 73.3%** |
+| 正确过程接受率 | **9 / 9 = 100%** |
+| 最终答案正确但过程错误的 trap 定位率 | **2 / 6 = 33.3%** |
+
+这个结果暴露了比简单代数攻击更有价值的弱点：Gemini Flash 对普通错误和完全正确解答区分较好，但会把 4 / 6 条 lucky-answer 轨迹误判为全过程正确。例如 `gsm8k-290` 的第 0 步文字声称一个量是另一个量的“两倍”，同一步计算却实际乘了四倍；最终答案碰巧正确，Verifier 因此漏掉了局部矛盾。
+
+```mermaid
+flowchart LR
+    Public["公开 ProcessBench JSON\nGSM8K / MATH / OlympiadBench / Omni-MATH"] --> Import["类型化导入\nproblem + numbered steps + first-error label"]
+    Import --> Blind["Oracle-blind Verifier\n只接收题目与步骤"]
+    Blind --> Observation["逐 case Observation\n预测首错步骤 + confidence + rationale"]
+    Observation --> Metrics["离线指标\n检出率 · 精确定位率 · lucky-answer trap"]
+    Observation --> Replay["可恢复执行\n增量写入 · 缺失 case 补跑"]
+```
+
+完整 case、24 条真实模型输出、报告和复现命令位于 [ProcessBench GSM8K pilot](examples/processbench-gsm8k/README.md)。这是诊断切片，不是完整 400 条 split 的排行榜结果；下一阶段应扩大到完整 GSM8K，并加入 MATH、OlympiadBench、Omni-MATH 和多模型对照。
+
+其他可复用公开资源及其合理定位：
+
+| 公开资源 | 最适合在本项目中的用途 |
+| --- | --- |
+| [ProcessBench](https://huggingface.co/datasets/Qwen/ProcessBench) | 评测 Verifier 的过程错误检测与第一处错误定位；已接入。 |
+| [PRM800K](https://github.com/openai/prm800k) | 约 80 万条逐步正确性标签，可用于训练或校准 Process Reward Model，而不是只做评测。 |
+| [MATH](https://github.com/hendrycks/math) / [GSM8K](https://github.com/openai/grade-school-math) | 提供公开数学问题与参考解答，可生成受控错误轨迹、验证最终答案和构建 clean/attack 对。 |
+| [RewardBench](https://github.com/allenai/reward-bench) | 将评测扩展到通用偏好、拒答、安全和推理回答，检查 Reward Model/Judge 的选择偏差。 |
+
 ## 工作台
 
 本地 React 工作台展示完整运行过程，而不是只显示最终 PDF。一份已经完成的 19 题运行可以在同一个界面中逐题检查、编辑、重跑和发布。
@@ -74,7 +111,7 @@ flowchart LR
 
 界面截图来自一份完成态的动态离散数学 workspace。下方可下载产物是另一份高考数学案例。两者都来自保留的本地验收运行，不是模拟 UI 数据。
 
-## 已验证 Demo
+## 已验证演示
 
 仓库包含一份由工作台真实生成并发布的端到端案例：19 题、150 分的高考数学模拟卷。
 
@@ -110,7 +147,7 @@ flowchart LR
 
 这些数字来自一次验收运行，不是多随机种子 Benchmark。数学正确性尚未经过独立专家评分；当前证据证明的是工作流完成、Artifact 完整性和渲染质量。
 
-## 真实案例复盘：高考数学第 19 题
+## 工程案例复盘：高考数学第 19 题
 
 下面展示的不是用于冒烟测试的简单代数 fixture，而是已提交 19 题高考数学整卷中的最后一道 17 分解析几何题。它同时涉及椭圆方程确定、直线与圆锥曲线联立、韦达定理、面积变换、导数最值证明和竖直直线边界情形。
 
@@ -319,7 +356,7 @@ flowchart TD
     Release --> Done["DONE"]
 ```
 
-## Agent 交互
+## 多智能体交互
 
 ```mermaid
 sequenceDiagram
@@ -390,7 +427,7 @@ sequenceDiagram
 
 Writer、Solver 和 Rubric Builder 不共享一段不受约束的对话历史。它们通过类型化、版本化领域对象通信。Reviewer 绑定精确版本 ID，因此编辑后旧报告不会被静默复用。
 
-## 结构化反馈与 Reward Candidate
+## 结构化反馈与奖励候选
 
 系统当前不会把所有评测结果压缩成单个标量 Reward，而是保留可以重放、审计并在未来校准的高维信号向量。
 
@@ -422,7 +459,7 @@ reward_candidate =
 
 该表达式是拟议的研究接口，不是当前已经训练完成的 Reward Model。仓库保存了离线测试不同权重、聚合方式、分歧处理和 Anti-Hacking 规则所需的原始组成信号。
 
-## Workflow Run 状态机
+## 工作流运行状态机
 
 `WorkflowRun.status` 通过显式迁移表校验。
 
@@ -512,7 +549,7 @@ flowchart TD
 
 替换历史会保留旧 child-run 指针与 Bundle。非目标题目保持不变。任何绑定的 Question、Solution 或 Rubric 版本变化都会让旧整卷审核报告失效。
 
-## Checkpoint 与恢复设计
+## 检查点与恢复设计
 
 ```mermaid
 flowchart LR
@@ -536,7 +573,7 @@ flowchart LR
 
 完成事件与 checkpoint 在一个 SQLite 事务中提交。Artifact 文件和 SQLite 属于不同事务域，因此发布采用可恢复的写入与绑定语义，而不是宣称跨介质 ACID。
 
-## 面向 Agentic RL 的可重放轨迹
+## 面向智能体强化学习的可重放轨迹
 
 运行时保存了足够的结构，可以在不依赖单段拼接 Chat Log 的情况下重建一个 Agent episode。
 
@@ -612,7 +649,7 @@ CapabilityCatalog
 
 Capability 锁定结构和政策，不保存静态题目。Prompt 版本、Capability ID、Validator 名称、模型角色、请求哈希、响应哈希、token 使用量和 provider request ID 都会写入审计轨迹。
 
-## Artifact 与审计模型
+## 产物与审计模型
 
 | 记录 | 用途 |
 | --- | --- |
@@ -677,6 +714,7 @@ src/assessment_workbench/
   benchmarking.py              Oracle 标签、受控攻击与 Verifier 指标
   benchmark_runner.py          可恢复的 Oracle-blind LLM Verifier 执行器
   benchmark_export.py          RLVR Episode 与 Preference JSONL 导出器
+  process_benchmark.py         ProcessBench 导入、首错定位执行器与指标
   storage.py                   SQLite RunStore 与文件系统 ArtifactStore
   web_api.py                   类型化本地 HTTP 与 SSE 接口
 
@@ -689,18 +727,20 @@ docs/                          架构与实现说明
 进一步阅读：
 
 - [架构说明](docs/architecture.md)
+- [ProcessBench GSM8K Pilot](examples/processbench-gsm8k/README.md)
 - [高考数学 Demo](examples/gaokao-mathematics/README.md)
 - [实现状态](docs/IMPLEMENTATION_PLAN.md)
 
-## Verifier Benchmark 工作流
+## 验证器基准工作流
 
-仓库现在包含一套离线 Benchmark 层，用于测试 Verifier 能否拒绝语义无效的 `QuestionVersion` / `SolutionVersion` / `RubricVersion` Bundle。Benchmark 标签独立于被测 Verifier：
+仓库现在包含两类互补的离线 Benchmark：一类测试 Verifier 能否拒绝语义无效的 `QuestionVersion` / `SolutionVersion` / `RubricVersion` Bundle；另一类使用 ProcessBench 测试第一处推理错误定位。Benchmark 标签都独立于被测 Verifier：
 
 - `BenchmarkCase` 保存不可变 Bundle、Oracle verdict、错误目标、错误代码、证据引用以及 clean/attack lineage。
 - `VerifierObservation` 将一份 `ReviewReport` 绑定到它实际评测的精确 Question、Solution 和 Rubric 版本 ID。
 - 六类受控变异已经全部实现：格式合法但语义错误、答案碰巧正确但推理无效、共享错误前提、Rubric 漏洞、题目条件不足以及难度/覆盖投机。
 - 变异版本 ID 基于 parent version 与 mutation contract 使用 UUIDv5，因此相同 clean input 的重复生成可以达到字节级复现。
 - 数据集校验覆盖闭合 parent lineage、连续 candidate index、logical ID、预期组件变异范围和 parent-version transition。
+- `ProcessBenchmarkCase` 保留公开题目、编号步骤、第一处错误标签和来源许可证；执行器只向模型暴露题目与步骤。
 
 ```mermaid
 flowchart LR
@@ -801,7 +841,7 @@ uv run assessment-workbench benchmark export-preferences \
 
 读取器会拒绝 Observation 缺失、ID 重复、未知 case 引用、不完整的 case × verifier 矩阵、内容版本不匹配、断裂的 parent lineage 和 mutation-profile 违规。这样，指标可以针对冻结 Artifact 重放，而不会静默评测另一个 Bundle 修订版本。
 
-## Reward-Hacking 威胁模型
+## 奖励投机威胁模型
 
 测评生成适合进行 Verifier 研究，因为输出可能在结构上完全正确，却利用语义检查或评分规则的弱点。
 
@@ -819,7 +859,7 @@ uv run assessment-workbench benchmark export-preferences \
 
 仓库现在已经包含 Benchmark contract、六类受控攻击生成器、确定性 baseline、可恢复 LLM 评测 runner、三 trial Gemini Flash pilot、离线指标以及 RLVR Episode/Preference exporter。但目前仍没有专家校验的对抗语料、在 held-out adaptive attack 上进行的匹配多模型/多随机种子实验，也没有测得 Reward-Hacking Attack Success Rate 的下降幅度。
 
-## RLVR 与 Reward-Hacking 评测路线图
+## 可验证奖励强化学习与奖励投机评测路线图
 
 下一项最有价值的实验是受控 Verifier 与对抗评测 pilot：
 

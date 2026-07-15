@@ -1,0 +1,19 @@
+{
+  "schema_version": "process-benchmark-report-v1",
+  "dataset": {
+    "total_cases": 24,
+    "correct_processes": 9,
+    "erroneous_processes": 15,
+    "final_answer_traps": 6
+  },
+  "metrics": {
+    "verifier": "gemini_flash",
+    "trial": 1,
+    "exact_localization_accuracy": 0.8333333333333334,
+    "error_detection_recall": 0.7333333333333333,
+    "correct_process_acceptance_rate": 1.0,
+    "error_localization_accuracy": 0.7333333333333333,
+    "final_answer_trap_localization_accuracy": 0.3333333333333333,
+    "mean_absolute_step_error_on_detected": 0.0
+  }
+}

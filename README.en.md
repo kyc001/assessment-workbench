@@ -50,6 +50,43 @@ This framing exposes several research objects that a conventional exam generator
 - **replayable trajectories:** exact inputs, outputs, versions, model-call metadata, state transitions, and recovery events;
 - **counterfactual repair points:** problem, solution, rubric, question plan, section, or full-run boundaries.
 
+## Public Process Evaluation: ProcessBench
+
+The Gaokao case demonstrates a real multi-agent generation and publishing workflow, but it is not a standardized research benchmark. The repository now integrates [ProcessBench](https://huggingface.co/datasets/Qwen/ProcessBench), an Apache-2.0 public benchmark that asks a verifier to locate the **first incorrect step** in a mathematical solution.
+
+ProcessBench is closer to the project's research question than final-answer accuracy alone. A verifier must distinguish a fully correct process, a process whose error produces a wrong answer, and a process whose reasoning is already invalid even though the final answer happens to be correct. The last category is a direct process-reward exploitation surface.
+
+The first committed pilot selects 24 diagnostic cases from the ProcessBench GSM8K split and evaluates `gemini-3.5-flash` once at temperature zero without exposing Oracle labels:
+
+| Public benchmark metric | Observed Gemini Flash result |
+| --- | ---: |
+| Exact first-error match | **20 / 24 = 83.3%** |
+| Erroneous-process detection recall | **11 / 15 = 73.3%** |
+| Correct-process acceptance | **9 / 9 = 100%** |
+| Correct-final-answer / wrong-process trap localization | **2 / 6 = 33.3%** |
+
+This exposes a more useful weakness than the earlier explicit algebra attacks. Gemini Flash separates ordinary errors from fully correct solutions reasonably well, but it incorrectly accepts 4 / 6 lucky-answer trajectories as entirely correct. In `gsm8k-290`, for example, step zero says one quantity is “twice” another while the calculation in the same step actually multiplies it by four; the final answer is correct, and the verifier misses the local contradiction.
+
+```mermaid
+flowchart LR
+    Public["Public ProcessBench JSON\nGSM8K / MATH / OlympiadBench / Omni-MATH"] --> Import["Typed import\nproblem + numbered steps + first-error label"]
+    Import --> Blind["Oracle-blind verifier\nproblem and steps only"]
+    Blind --> Observation["Per-case observation\npredicted step + confidence + rationale"]
+    Observation --> Metrics["Offline metrics\ndetection · localization · lucky-answer traps"]
+    Observation --> Replay["Resume-safe execution\nincremental writes · missing-case retry"]
+```
+
+The cases, 24 real model outputs, report, and reproduction commands are committed under the [ProcessBench GSM8K pilot](examples/processbench-gsm8k/README.md). This is a diagnostic slice, not a leaderboard result over the complete 400-case split. The next step is full-GSM8K evaluation followed by MATH, OlympiadBench, Omni-MATH, and matched multi-model comparisons.
+
+Other public resources fit different parts of the research program:
+
+| Public resource | Best use in Assessment Workbench |
+| --- | --- |
+| [ProcessBench](https://huggingface.co/datasets/Qwen/ProcessBench) | Evaluate process-error detection and first-error localization; integrated now. |
+| [PRM800K](https://github.com/openai/prm800k) | Approximately 800,000 step-level correctness labels for training or calibrating a Process Reward Model. |
+| [MATH](https://github.com/hendrycks/math) / [GSM8K](https://github.com/openai/grade-school-math) | Public problems and reference solutions for controlled error trajectories, answer verification, and clean/attack pairs. |
+| [RewardBench](https://github.com/allenai/reward-bench) | Extend evaluation to general preference, refusal, safety, and reasoning responses to measure reward-model or judge selection bias. |
+
 ## Workbench
 
 The local React workbench exposes the complete run instead of hiding it behind a final PDF. A completed 19-question run can be inspected question by question, edited, rerun, and published from the same interface.
@@ -110,7 +147,7 @@ Download the actual artifacts:
 
 These are acceptance-run measurements, not a multi-seed benchmark. Mathematical correctness has not yet been independently expert-rated; the current evidence establishes workflow completion, artifact integrity, and render quality.
 
-## Real Case Walkthrough: Gaokao Question 19
+## Engineering Case Walkthrough: Gaokao Question 19
 
 The following is not a toy verifier fixture. It is the final 17-point analytic-geometry problem from the committed 19-question Gaokao mathematics run. The task combines ellipse identification, line-conic elimination, Vieta's formulas, an area transformation, derivative-based optimization, and a separate vertical-line boundary case.
 
@@ -677,6 +714,7 @@ src/assessment_workbench/
   benchmarking.py              oracle labels, controlled attacks, verifier metrics
   benchmark_runner.py          resumable Oracle-blind LLM verifier execution
   benchmark_export.py          RLVR episode and preference JSONL exporters
+  process_benchmark.py         ProcessBench import, first-error runner, and metrics
   storage.py                   SQLite RunStore and filesystem ArtifactStore
   web_api.py                   typed local HTTP and SSE interface
 
@@ -689,18 +727,20 @@ docs/                          architecture and implementation notes
 Further reading:
 
 - [Architecture notes](docs/architecture.md)
+- [ProcessBench GSM8K pilot](examples/processbench-gsm8k/README.md)
 - [Gaokao demo](examples/gaokao-mathematics/README.md)
 - [Implementation status](docs/IMPLEMENTATION_PLAN.md)
 
 ## Verifier Benchmark Workflow
 
-The repository now includes an offline benchmark layer for testing whether a verifier rejects semantically invalid `QuestionVersion` / `SolutionVersion` / `RubricVersion` bundles. Benchmark labels are independent of the verifier under test:
+The repository now includes two complementary offline benchmark paths: one tests whether a verifier rejects semantically invalid `QuestionVersion` / `SolutionVersion` / `RubricVersion` bundles, while the ProcessBench path tests first-error localization in mathematical reasoning. All labels remain independent of the verifier under test:
 
 - `BenchmarkCase` stores an immutable bundle, an Oracle verdict, error targets, error codes, evidence references, and clean/attack lineage.
 - `VerifierObservation` binds one `ReviewReport` to the exact question, solution, and rubric version IDs that it evaluated.
 - All six controlled mutation families are implemented: format-valid semantic error, lucky answer with invalid reasoning, shared false premise, rubric loophole, underspecified question, and difficulty/coverage gaming.
 - Mutated version IDs use UUIDv5 over the parent version and mutation contract, so repeated generation from the same clean input is byte-reproducible.
 - Dataset validation checks closed parent lineage, contiguous candidate indices, logical IDs, expected component-level mutations, and parent-version transitions.
+- `ProcessBenchmarkCase` retains the public problem, numbered steps, first-error label, and source license while the runner exposes only the problem and steps to the model.
 
 ```mermaid
 flowchart LR
