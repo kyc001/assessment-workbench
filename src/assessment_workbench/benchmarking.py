@@ -150,6 +150,25 @@ class VerifierDisagreementMetrics(StrictModel):
     cases: list[CaseDisagreement] = Field(min_length=1)
 
 
+class BenchmarkDatasetSummary(StrictModel):
+    total_cases: int = Field(ge=1)
+    clean_cases: int = Field(ge=1)
+    attack_cases: int = Field(ge=0)
+    attack_counts: dict[str, int]
+
+
+_ATTACK_CHANGED_COMPONENTS: dict[AttackKind, frozenset[str]] = {
+    AttackKind.FORMAT_VALID_SEMANTIC_ERROR: frozenset({"solution", "rubric"}),
+    AttackKind.LUCKY_ANSWER_WRONG_REASONING: frozenset({"solution", "rubric"}),
+    AttackKind.SHARED_FALSE_PREMISE: frozenset({"question", "solution", "rubric"}),
+    AttackKind.RUBRIC_LOOPHOLE: frozenset({"rubric"}),
+    AttackKind.UNDERSPECIFIED_QUESTION: frozenset({"question", "solution", "rubric"}),
+    AttackKind.DIFFICULTY_COVERAGE_GAMING: frozenset(
+        {"question", "solution", "rubric"}
+    ),
+}
+
+
 def generate_format_valid_semantic_error_attack(
     source: BenchmarkCase,
     *,
@@ -522,6 +541,67 @@ def generate_benchmark_attack(
     return generators[attack_kind](source, case_id=case_id)
 
 
+def build_attack_dataset(
+    clean_cases: Iterable[BenchmarkCase],
+    *,
+    attack_kinds: Iterable[AttackKind] | None = None,
+) -> list[BenchmarkCase]:
+    materialized = list(clean_cases)
+    _validate_case_ids(materialized)
+    if any(case.attack_kind is not None for case in materialized):
+        raise ValueError("attack dataset generation requires clean benchmark cases")
+    selected_kinds = list(attack_kinds) if attack_kinds is not None else list(AttackKind)
+    if not selected_kinds:
+        raise ValueError("attack dataset generation requires at least one attack kind")
+    if len(selected_kinds) != len(set(selected_kinds)):
+        raise ValueError("attack kinds must be unique")
+
+    dataset: list[BenchmarkCase] = []
+    for clean in materialized:
+        dataset.append(clean)
+        dataset.extend(generate_benchmark_attack(clean, kind) for kind in selected_kinds)
+    validate_benchmark_dataset(dataset)
+    return dataset
+
+
+def validate_benchmark_dataset(
+    cases: Iterable[BenchmarkCase],
+) -> BenchmarkDatasetSummary:
+    materialized = list(cases)
+    _validate_case_ids(materialized)
+    case_by_id = {case.case_id: case for case in materialized}
+    clean_cases = [case for case in materialized if case.attack_kind is None]
+    attacked_cases = [case for case in materialized if case.attack_kind is not None]
+    if not clean_cases:
+        raise ValueError("benchmark dataset requires at least one clean case")
+
+    attack_counts = {kind.value: 0 for kind in AttackKind}
+    for attacked in attacked_cases:
+        assert attacked.attack_kind is not None
+        parent = case_by_id.get(attacked.parent_case_id or "")
+        if parent is None:
+            raise ValueError(
+                f"attacked benchmark case references missing parent: {attacked.case_id}"
+            )
+        if parent.attack_kind is not None:
+            raise ValueError(
+                f"attacked benchmark case parent must be clean: {attacked.case_id}"
+            )
+        if attacked.attack_iteration != 1:
+            raise ValueError(
+                f"first-generation benchmark attack requires iteration 1: {attacked.case_id}"
+            )
+        _validate_attack_transition(parent, attacked)
+        attack_counts[attacked.attack_kind.value] += 1
+
+    return BenchmarkDatasetSummary(
+        total_cases=len(materialized),
+        clean_cases=len(clean_cases),
+        attack_cases=len(attacked_cases),
+        attack_counts=attack_counts,
+    )
+
+
 def _require_clean_source(source: BenchmarkCase, attack_kind: AttackKind) -> None:
     if source.attack_kind is not None:
         label = attack_kind.value.replace("_", " ")
@@ -642,6 +722,62 @@ def _build_attack_case(
         source_artifact_id=source.source_artifact_id,
         tags=list(dict.fromkeys([*source.tags, "attack", kind.value])),
     )
+
+
+def _validate_attack_transition(parent: BenchmarkCase, attacked: BenchmarkCase) -> None:
+    assert attacked.attack_kind is not None
+    expected_changes = _ATTACK_CHANGED_COMPONENTS[attacked.attack_kind]
+    parent_bundle = parent.bundle
+    attacked_bundle = attacked.bundle
+    if attacked_bundle.question.question_id != parent_bundle.question.question_id:
+        raise ValueError(f"attack changed logical question id: {attacked.case_id}")
+    if attacked_bundle.solution.solution_id != parent_bundle.solution.solution_id:
+        raise ValueError(f"attack changed logical solution id: {attacked.case_id}")
+    if attacked_bundle.rubric.rubric_id != parent_bundle.rubric.rubric_id:
+        raise ValueError(f"attack changed logical rubric id: {attacked.case_id}")
+    _validate_component_transition(
+        parent_bundle.question,
+        attacked_bundle.question,
+        changed="question" in expected_changes,
+        component="question",
+        case_id=attacked.case_id,
+    )
+    _validate_component_transition(
+        parent_bundle.solution,
+        attacked_bundle.solution,
+        changed="solution" in expected_changes,
+        component="solution",
+        case_id=attacked.case_id,
+    )
+    _validate_component_transition(
+        parent_bundle.rubric,
+        attacked_bundle.rubric,
+        changed="rubric" in expected_changes,
+        component="rubric",
+        case_id=attacked.case_id,
+    )
+
+
+def _validate_component_transition(
+    parent: QuestionVersion | SolutionVersion | RubricVersion,
+    attacked: QuestionVersion | SolutionVersion | RubricVersion,
+    *,
+    changed: bool,
+    component: str,
+    case_id: str,
+) -> None:
+    if not changed:
+        if attacked != parent:
+            raise ValueError(
+                f"{component} changed outside the attack mutation profile: {case_id}"
+            )
+        return
+    if attacked.id == parent.id:
+        raise ValueError(f"attack reused changed {component} version id: {case_id}")
+    if attacked.version != parent.version + 1:
+        raise ValueError(f"attack {component} version is not parent + 1: {case_id}")
+    if attacked.parent_version_id != parent.id:
+        raise ValueError(f"attack {component} parent version mismatch: {case_id}")
 
 
 def write_benchmark_cases(path: Path, cases: Iterable[BenchmarkCase]) -> Path:

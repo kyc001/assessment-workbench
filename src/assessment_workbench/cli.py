@@ -15,11 +15,13 @@ from assessment_workbench.application import (
     publish_question_bundle,
 )
 from assessment_workbench.benchmarking import (
+    AttackKind,
+    build_attack_dataset,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
-    generate_rubric_loophole_attack,
     read_benchmark_cases,
     read_verifier_observations,
+    validate_benchmark_dataset,
     write_benchmark_cases,
 )
 from assessment_workbench.config import Settings
@@ -94,6 +96,45 @@ def _console_safe(value: object, *, err: bool = False) -> str:
     return text.encode(encoding, errors="replace").decode(encoding)
 
 
+def _emit_json(payload: str, output: Path | None) -> None:
+    if output is None:
+        typer.echo(payload)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(f"{payload}\n", encoding="utf-8")
+    typer.echo(output)
+
+
+@benchmark_app.command("attack")
+def generate_attack_benchmark(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Paired clean and attacked benchmark JSONL path"),
+    ],
+    attack_kinds: Annotated[
+        list[AttackKind] | None,
+        typer.Option(
+            "--attack",
+            help="Attack family; repeat as needed. Defaults to all families.",
+        ),
+    ] = None,
+) -> None:
+    try:
+        dataset = build_attack_dataset(
+            read_benchmark_cases(cases_path),
+            attack_kinds=attack_kinds,
+        )
+        write_benchmark_cases(output, dataset)
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(output)
+
+
 @benchmark_app.command("attack-rubric")
 def generate_rubric_loophole_benchmark(
     cases_path: Annotated[
@@ -107,12 +148,33 @@ def generate_rubric_loophole_benchmark(
 ) -> None:
     try:
         clean_cases = read_benchmark_cases(cases_path)
-        attacked_cases = [generate_rubric_loophole_attack(case) for case in clean_cases]
-        write_benchmark_cases(output, [*clean_cases, *attacked_cases])
+        write_benchmark_cases(
+            output,
+            build_attack_dataset(
+                clean_cases,
+                attack_kinds=[AttackKind.RUBRIC_LOOPHOLE],
+            ),
+        )
     except (OSError, ValueError) as exc:
         typer.echo(_console_safe(exc, err=True), err=True)
         raise typer.Exit(1) from exc
     typer.echo(output)
+
+
+@benchmark_app.command("validate")
+def validate_benchmark(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    output: Annotated[Path | None, typer.Option(help="Optional JSON output path")] = None,
+) -> None:
+    try:
+        summary = validate_benchmark_dataset(read_benchmark_cases(cases_path))
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    _emit_json(summary.model_dump_json(indent=2), output)
 
 
 @benchmark_app.command("disagreement")
@@ -148,13 +210,7 @@ def evaluate_verifier_disagreement(
     except (OSError, ValueError) as exc:
         typer.echo(_console_safe(exc, err=True), err=True)
         raise typer.Exit(1) from exc
-    payload = metrics.model_dump_json(indent=2)
-    if output is None:
-        typer.echo(payload)
-        return
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(f"{payload}\n", encoding="utf-8")
-    typer.echo(output)
+    _emit_json(metrics.model_dump_json(indent=2), output)
 
 
 @benchmark_app.command("evaluate")
@@ -187,13 +243,7 @@ def evaluate_benchmark(
     except (OSError, ValueError) as exc:
         typer.echo(_console_safe(exc, err=True), err=True)
         raise typer.Exit(1) from exc
-    payload = metrics.model_dump_json(indent=2)
-    if output is None:
-        typer.echo(payload)
-        return
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(f"{payload}\n", encoding="utf-8")
-    typer.echo(output)
+    _emit_json(metrics.model_dump_json(indent=2), output)
 
 
 def _artifact_display_path(

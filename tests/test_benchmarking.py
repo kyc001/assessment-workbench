@@ -13,6 +13,7 @@ from assessment_workbench.benchmarking import (
     OracleMethod,
     OracleVerdict,
     VerifierObservation,
+    build_attack_dataset,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
     generate_benchmark_attack,
@@ -24,6 +25,7 @@ from assessment_workbench.benchmarking import (
     generate_underspecified_question_attack,
     read_benchmark_cases,
     read_verifier_observations,
+    validate_benchmark_dataset,
     write_benchmark_cases,
     write_verifier_observations,
 )
@@ -295,6 +297,54 @@ def test_generate_difficulty_coverage_gaming_preserves_nominal_metadata() -> Non
     assert "No subject knowledge" in attacked.bundle.question.statement[0].content
     assert attacked.bundle.solution.final_answer[0].content == "1"
     assert attacked.oracle.error_codes == ["difficulty_coverage_metadata_mismatch"]
+
+
+def test_build_attack_dataset_generates_all_families_per_clean_case() -> None:
+    first = _clean_case("clean-first")
+    second = _clean_case("clean-second")
+
+    dataset = build_attack_dataset([first, second])
+    summary = validate_benchmark_dataset(dataset)
+
+    assert len(dataset) == 2 * (1 + len(AttackKind))
+    assert summary.clean_cases == 2
+    assert summary.attack_cases == 2 * len(AttackKind)
+    assert summary.attack_counts == {kind.value: 2 for kind in AttackKind}
+
+
+def test_build_attack_dataset_supports_selected_attack_families() -> None:
+    clean = _clean_case()
+
+    dataset = build_attack_dataset(
+        [clean],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE, AttackKind.UNDERSPECIFIED_QUESTION],
+    )
+
+    assert [case.attack_kind for case in dataset] == [
+        None,
+        AttackKind.RUBRIC_LOOPHOLE,
+        AttackKind.UNDERSPECIFIED_QUESTION,
+    ]
+
+
+def test_validate_benchmark_dataset_rejects_missing_parent() -> None:
+    clean = _clean_case()
+    attacked = generate_rubric_loophole_attack(clean).model_copy(
+        update={"parent_case_id": "missing-parent"}
+    )
+
+    with pytest.raises(ValueError, match="references missing parent"):
+        validate_benchmark_dataset([clean, attacked])
+
+
+def test_validate_benchmark_dataset_rejects_mutation_profile_mismatch() -> None:
+    clean = _clean_case()
+    attacked = generate_shared_false_premise_attack(clean).model_copy(
+        update={"attack_kind": AttackKind.RUBRIC_LOOPHOLE}
+    )
+
+    with pytest.raises(ValueError, match="question changed outside"):
+        validate_benchmark_dataset([clean, attacked])
 
 
 def test_generate_rubric_loophole_attack_versions_only_the_rubric() -> None:
@@ -655,4 +705,74 @@ def test_benchmark_attack_rubric_cli_rejects_attacked_input(tmp_path: Path) -> N
     )
 
     assert result.exit_code == 1
-    assert "requires a clean benchmark case" in result.output
+    assert "requires clean benchmark cases" in result.output
+
+
+def test_benchmark_attack_cli_generates_all_families(tmp_path: Path) -> None:
+    clean = _clean_case("clean-cli-all-attacks")
+    cases_path = write_benchmark_cases(tmp_path / "clean.jsonl", [clean])
+    output_path = tmp_path / "all-attacks.jsonl"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "attack",
+            "--cases",
+            str(cases_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    dataset = read_benchmark_cases(output_path)
+    assert [case.attack_kind for case in dataset] == [None, *list(AttackKind)]
+
+
+def test_benchmark_attack_cli_accepts_repeated_attack_options(tmp_path: Path) -> None:
+    clean = _clean_case("clean-cli-selected-attacks")
+    cases_path = write_benchmark_cases(tmp_path / "clean.jsonl", [clean])
+    output_path = tmp_path / "selected-attacks.jsonl"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "attack",
+            "--cases",
+            str(cases_path),
+            "--output",
+            str(output_path),
+            "--attack",
+            AttackKind.RUBRIC_LOOPHOLE.value,
+            "--attack",
+            AttackKind.SHARED_FALSE_PREMISE.value,
+        ],
+    )
+
+    assert result.exit_code == 0
+    dataset = read_benchmark_cases(output_path)
+    assert [case.attack_kind for case in dataset] == [
+        None,
+        AttackKind.RUBRIC_LOOPHOLE,
+        AttackKind.SHARED_FALSE_PREMISE,
+    ]
+
+
+def test_benchmark_validate_cli_outputs_dataset_summary(tmp_path: Path) -> None:
+    dataset = build_attack_dataset(
+        [_clean_case("clean-cli-validate")],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE],
+    )
+    cases_path = write_benchmark_cases(tmp_path / "paired.jsonl", dataset)
+
+    result = CliRunner().invoke(
+        app,
+        ["benchmark", "validate", "--cases", str(cases_path)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["total_cases"] == 2
+    assert payload["attack_counts"][AttackKind.RUBRIC_LOOPHOLE.value] == 1
