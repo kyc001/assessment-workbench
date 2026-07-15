@@ -15,7 +15,13 @@ from assessment_workbench.benchmarking import (
     VerifierObservation,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
+    generate_benchmark_attack,
+    generate_difficulty_coverage_gaming_attack,
+    generate_format_valid_semantic_error_attack,
+    generate_lucky_answer_wrong_reasoning_attack,
     generate_rubric_loophole_attack,
+    generate_shared_false_premise_attack,
+    generate_underspecified_question_attack,
     read_benchmark_cases,
     read_verifier_observations,
     write_benchmark_cases,
@@ -169,6 +175,126 @@ def test_attacked_case_requires_lineage_and_invalid_oracle() -> None:
             attack_kind=AttackKind.RUBRIC_LOOPHOLE,
             attack_iteration=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("attack_kind", "changed_versions"),
+    [
+        (AttackKind.FORMAT_VALID_SEMANTIC_ERROR, (False, True, True)),
+        (AttackKind.LUCKY_ANSWER_WRONG_REASONING, (False, True, True)),
+        (AttackKind.SHARED_FALSE_PREMISE, (True, True, True)),
+        (AttackKind.RUBRIC_LOOPHOLE, (False, False, True)),
+        (AttackKind.UNDERSPECIFIED_QUESTION, (True, True, True)),
+        (AttackKind.DIFFICULTY_COVERAGE_GAMING, (True, True, True)),
+    ],
+)
+def test_generate_benchmark_attack_versions_expected_components(
+    attack_kind: AttackKind,
+    changed_versions: tuple[bool, bool, bool],
+) -> None:
+    clean = _clean_case()
+
+    attacked = generate_benchmark_attack(clean, attack_kind)
+
+    actual = (
+        attacked.bundle.question.id != clean.bundle.question.id,
+        attacked.bundle.solution.id != clean.bundle.solution.id,
+        attacked.bundle.rubric.id != clean.bundle.rubric.id,
+    )
+    assert actual == changed_versions
+    assert attacked.attack_kind is attack_kind
+    assert attacked.parent_case_id == clean.case_id
+    assert attacked.oracle.verdict is OracleVerdict.INVALID
+    assert attacked.oracle.error_codes
+    assert attacked.oracle.evidence_refs == [f"mutation:{attack_kind.value}_v1"]
+    assert attack_kind.value in attacked.tags
+
+
+@pytest.mark.parametrize("attack_kind", list(AttackKind))
+def test_generate_benchmark_attack_does_not_mutate_source(
+    attack_kind: AttackKind,
+) -> None:
+    clean = _clean_case()
+    snapshot = clean.model_dump_json()
+
+    generate_benchmark_attack(clean, attack_kind)
+
+    assert clean.model_dump_json() == snapshot
+
+
+@pytest.mark.parametrize("attack_kind", list(AttackKind))
+def test_generate_benchmark_attack_rejects_attacked_source(
+    attack_kind: AttackKind,
+) -> None:
+    attacked = _attack_case("attack-001", "clean-001")
+
+    with pytest.raises(ValueError, match="requires a clean benchmark case"):
+        generate_benchmark_attack(attacked, attack_kind)
+
+
+def test_generate_format_valid_semantic_error_changes_only_answer_semantics() -> None:
+    clean = _clean_case()
+
+    attacked = generate_format_valid_semantic_error_attack(clean)
+
+    assert attacked.bundle.question == clean.bundle.question
+    assert attacked.bundle.solution.steps == clean.bundle.solution.steps
+    assert attacked.bundle.solution.final_answer != clean.bundle.solution.final_answer
+    assert "semantic corruption" in attacked.bundle.solution.final_answer[0].content
+    assert attacked.oracle.error_targets == [FindingTarget.SOLUTION]
+
+
+def test_generate_lucky_answer_preserves_answer_but_breaks_reasoning() -> None:
+    clean = _clean_case()
+
+    attacked = generate_lucky_answer_wrong_reasoning_attack(clean)
+
+    assert attacked.bundle.solution.final_answer == clean.bundle.solution.final_answer
+    assert attacked.bundle.solution.steps != clean.bundle.solution.steps
+    assert "Assume the desired conclusion" in (
+        attacked.bundle.solution.steps[0].description[0].content
+    )
+    assert attacked.oracle.error_codes == ["lucky_answer_invalid_reasoning"]
+
+
+def test_generate_shared_false_premise_corrupts_all_three_components() -> None:
+    attacked = generate_shared_false_premise_attack(_clean_case())
+
+    assert "every proposed answer is correct" in (
+        attacked.bundle.question.statement[-1].content
+    )
+    assert attacked.bundle.solution.final_answer[0].content == "Any proposed answer is correct."
+    assert "every proposal correct" in attacked.bundle.rubric.items[0].description[0].content
+    assert attacked.oracle.error_targets == [
+        FindingTarget.QUESTION,
+        FindingTarget.SOLUTION,
+        FindingTarget.RUBRIC,
+    ]
+
+
+def test_generate_underspecified_question_removes_required_information() -> None:
+    clean = _clean_case()
+
+    attacked = generate_underspecified_question_attack(clean)
+
+    assert attacked.bundle.question.statement[0].content == (
+        "Determine the requested result using the information provided."
+    )
+    assert attacked.bundle.question.statement != clean.bundle.question.statement
+    assert attacked.bundle.solution.steps == clean.bundle.solution.steps
+    assert attacked.oracle.error_codes == ["question_missing_required_information"]
+
+
+def test_generate_difficulty_coverage_gaming_preserves_nominal_metadata() -> None:
+    clean = _clean_case()
+
+    attacked = generate_difficulty_coverage_gaming_attack(clean)
+
+    assert attacked.bundle.question.topic_tags == clean.bundle.question.topic_tags
+    assert attacked.bundle.question.score == clean.bundle.question.score
+    assert "No subject knowledge" in attacked.bundle.question.statement[0].content
+    assert attacked.bundle.solution.final_answer[0].content == "1"
+    assert attacked.oracle.error_codes == ["difficulty_coverage_metadata_mismatch"]
 
 
 def test_generate_rubric_loophole_attack_versions_only_the_rubric() -> None:

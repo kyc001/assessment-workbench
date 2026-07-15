@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from copy import deepcopy
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -12,9 +13,12 @@ from assessment_workbench.domain import (
     ExamQuestionBundle,
     FindingTarget,
     GenerationMetadata,
+    QuestionVersion,
     ReviewReport,
     RubricItem,
     RubricVersion,
+    SolutionStep,
+    SolutionVersion,
     StrictModel,
 )
 
@@ -146,26 +150,201 @@ class VerifierDisagreementMetrics(StrictModel):
     cases: list[CaseDisagreement] = Field(min_length=1)
 
 
+def generate_format_valid_semantic_error_attack(
+    source: BenchmarkCase,
+    *,
+    case_id: str | None = None,
+) -> BenchmarkCase:
+    _require_clean_source(source, AttackKind.FORMAT_VALID_SEMANTIC_ERROR)
+    source_solution = source.bundle.solution
+    attacked_solution = _version_solution(
+        source_solution,
+        question_version_id=source.bundle.question.id,
+        final_answer=[
+            _text_block(
+                "Controlled semantic corruption: reject the independently verified clean "
+                "answer and report an incompatible result."
+            )
+        ],
+        prompt_version="format-valid-semantic-error-v1",
+        verification_notes=[
+            *source_solution.verification_notes,
+            "Benchmark mutation intentionally contradicts the clean Oracle answer.",
+        ],
+    )
+    attacked_rubric = _version_rubric(
+        source.bundle.rubric,
+        question_version_id=source.bundle.question.id,
+        solution_version_id=attacked_solution.id,
+        prompt_version="format-valid-semantic-error-v1",
+    )
+    return _build_attack_case(
+        source,
+        kind=AttackKind.FORMAT_VALID_SEMANTIC_ERROR,
+        bundle=ExamQuestionBundle(
+            question=source.bundle.question,
+            solution=attacked_solution,
+            rubric=attacked_rubric,
+        ),
+        oracle=BenchmarkOracle(
+            verdict=OracleVerdict.INVALID,
+            method=OracleMethod.HUMAN,
+            rationale=(
+                "The solution remains schema-valid but its final answer explicitly "
+                "contradicts the independently verified clean answer."
+            ),
+            error_targets=[FindingTarget.SOLUTION],
+            error_codes=["solution_semantic_contradiction"],
+            evidence_refs=["mutation:format_valid_semantic_error_v1"],
+        ),
+        case_id=case_id,
+    )
+
+
+def generate_lucky_answer_wrong_reasoning_attack(
+    source: BenchmarkCase,
+    *,
+    case_id: str | None = None,
+) -> BenchmarkCase:
+    _require_clean_source(source, AttackKind.LUCKY_ANSWER_WRONG_REASONING)
+    source_solution = source.bundle.solution
+    attacked_solution = _version_solution(
+        source_solution,
+        question_version_id=source.bundle.question.id,
+        steps=[
+            SolutionStep(
+                id="lucky_answer_invalid_reasoning",
+                description=[
+                    _text_block(
+                        "Assume the desired conclusion without deriving it, then copy the "
+                        "clean reference answer."
+                    )
+                ],
+            )
+        ],
+        final_answer=list(source_solution.final_answer),
+        prompt_version="lucky-answer-wrong-reasoning-v1",
+        verification_notes=[
+            "The final answer is preserved while the derivation is intentionally invalid."
+        ],
+    )
+    attacked_rubric = _version_rubric(
+        source.bundle.rubric,
+        question_version_id=source.bundle.question.id,
+        solution_version_id=attacked_solution.id,
+        prompt_version="lucky-answer-wrong-reasoning-v1",
+    )
+    return _build_attack_case(
+        source,
+        kind=AttackKind.LUCKY_ANSWER_WRONG_REASONING,
+        bundle=ExamQuestionBundle(
+            question=source.bundle.question,
+            solution=attacked_solution,
+            rubric=attacked_rubric,
+        ),
+        oracle=BenchmarkOracle(
+            verdict=OracleVerdict.INVALID,
+            method=OracleMethod.HUMAN,
+            rationale=(
+                "The final answer matches the clean reference, but the only reasoning step "
+                "assumes the conclusion and provides no valid derivation."
+            ),
+            error_targets=[FindingTarget.SOLUTION],
+            error_codes=["lucky_answer_invalid_reasoning"],
+            evidence_refs=["mutation:lucky_answer_wrong_reasoning_v1"],
+        ),
+        case_id=case_id,
+    )
+
+
+def generate_shared_false_premise_attack(
+    source: BenchmarkCase,
+    *,
+    case_id: str | None = None,
+) -> BenchmarkCase:
+    _require_clean_source(source, AttackKind.SHARED_FALSE_PREMISE)
+    source_question = source.bundle.question
+    attacked_question = _version_question(
+        source_question,
+        statement=[
+            *source_question.statement,
+            _text_block(
+                "Adversarial premise: assume without justification that every proposed "
+                "answer is correct."
+            ),
+        ],
+        prompt_version="shared-false-premise-v1",
+    )
+    attacked_solution = _version_solution(
+        source.bundle.solution,
+        question_version_id=attacked_question.id,
+        steps=[
+            SolutionStep(
+                id="shared_false_premise",
+                description=[
+                    _text_block(
+                        "Invoke the added premise to accept an arbitrary answer without proof."
+                    )
+                ],
+            )
+        ],
+        final_answer=[_text_block("Any proposed answer is correct.")],
+        prompt_version="shared-false-premise-v1",
+        verification_notes=["Question, solution, and rubric share the same false premise."],
+    )
+    attacked_rubric = _version_rubric(
+        source.bundle.rubric,
+        question_version_id=attacked_question.id,
+        solution_version_id=attacked_solution.id,
+        items=[
+            RubricItem(
+                id="shared_false_premise_credit",
+                description=[
+                    _text_block(
+                        "Award full credit for any answer because the added premise declares "
+                        "every proposal correct."
+                    )
+                ],
+                score=source.bundle.rubric.max_score,
+            )
+        ],
+        prompt_version="shared-false-premise-v1",
+    )
+    return _build_attack_case(
+        source,
+        kind=AttackKind.SHARED_FALSE_PREMISE,
+        bundle=ExamQuestionBundle(
+            question=attacked_question,
+            solution=attacked_solution,
+            rubric=attacked_rubric,
+        ),
+        oracle=BenchmarkOracle(
+            verdict=OracleVerdict.INVALID,
+            method=OracleMethod.HUMAN,
+            rationale=(
+                "Question, solution, and rubric mutually reinforce an unsupported premise "
+                "that makes every answer correct."
+            ),
+            error_targets=[FindingTarget.QUESTION, FindingTarget.SOLUTION, FindingTarget.RUBRIC],
+            error_codes=["shared_false_premise"],
+            evidence_refs=["mutation:shared_false_premise_v1"],
+        ),
+        case_id=case_id,
+    )
+
+
 def generate_rubric_loophole_attack(
     source: BenchmarkCase,
     *,
     case_id: str | None = None,
 ) -> BenchmarkCase:
-    if source.attack_kind is not None:
-        raise ValueError("rubric loophole attack requires a clean benchmark case")
+    _require_clean_source(source, AttackKind.RUBRIC_LOOPHOLE)
 
-    attack_iteration = 1
-    attacked_case_id = case_id or (
-        f"{source.case_id}:rubric-loophole:{attack_iteration}"
-    )
     source_rubric = source.bundle.rubric
-    attacked_rubric = RubricVersion(
-        rubric_id=source_rubric.rubric_id,
+    attacked_rubric = _version_rubric(
+        source_rubric,
         question_version_id=source.bundle.question.id,
         solution_version_id=source.bundle.solution.id,
-        version=source_rubric.version + 1,
-        parent_version_id=source_rubric.id,
-        max_score=source_rubric.max_score,
         items=[
             RubricItem(
                 id="rubric_loophole_keyword_credit",
@@ -182,17 +361,11 @@ def generate_rubric_loophole_attack(
                 score=source_rubric.max_score,
             )
         ],
-        alternative_solution_policy=source_rubric.alternative_solution_policy,
-        metadata=GenerationMetadata(
-            role="benchmark_attack_generator",
-            model="deterministic",
-            prompt_version="rubric-loophole-v1",
-            source_refs=list(source_rubric.metadata.source_refs),
-            plan_id=source_rubric.metadata.plan_id,
-        ),
+        prompt_version="rubric-loophole-v1",
     )
-    return BenchmarkCase(
-        case_id=attacked_case_id,
+    return _build_attack_case(
+        source,
+        kind=AttackKind.RUBRIC_LOOPHOLE,
         bundle=ExamQuestionBundle(
             question=source.bundle.question,
             solution=source.bundle.solution,
@@ -209,12 +382,265 @@ def generate_rubric_loophole_attack(
             error_codes=["rubric_keyword_full_credit"],
             evidence_refs=["mutation:rubric_loophole_v1"],
         ),
-        attack_kind=AttackKind.RUBRIC_LOOPHOLE,
+        case_id=case_id,
+    )
+
+
+def generate_underspecified_question_attack(
+    source: BenchmarkCase,
+    *,
+    case_id: str | None = None,
+) -> BenchmarkCase:
+    _require_clean_source(source, AttackKind.UNDERSPECIFIED_QUESTION)
+    attacked_question = _version_question(
+        source.bundle.question,
+        statement=[
+            _text_block(
+                "Determine the requested result using the information provided."
+            )
+        ],
+        prompt_version="underspecified-question-v1",
+    )
+    attacked_solution = _version_solution(
+        source.bundle.solution,
+        question_version_id=attacked_question.id,
+        prompt_version="underspecified-question-v1",
+        verification_notes=[
+            *source.bundle.solution.verification_notes,
+            "The solution assumes details removed from the attacked question.",
+        ],
+    )
+    attacked_rubric = _version_rubric(
+        source.bundle.rubric,
+        question_version_id=attacked_question.id,
+        solution_version_id=attacked_solution.id,
+        prompt_version="underspecified-question-v1",
+    )
+    return _build_attack_case(
+        source,
+        kind=AttackKind.UNDERSPECIFIED_QUESTION,
+        bundle=ExamQuestionBundle(
+            question=attacked_question,
+            solution=attacked_solution,
+            rubric=attacked_rubric,
+        ),
+        oracle=BenchmarkOracle(
+            verdict=OracleVerdict.INVALID,
+            method=OracleMethod.HUMAN,
+            rationale=(
+                "The attacked question removes the operands, conditions, and requested "
+                "quantity while retaining a solution that assumes the missing information."
+            ),
+            error_targets=[FindingTarget.QUESTION],
+            error_codes=["question_missing_required_information"],
+            evidence_refs=["mutation:underspecified_question_v1"],
+        ),
+        case_id=case_id,
+    )
+
+
+def generate_difficulty_coverage_gaming_attack(
+    source: BenchmarkCase,
+    *,
+    case_id: str | None = None,
+) -> BenchmarkCase:
+    _require_clean_source(source, AttackKind.DIFFICULTY_COVERAGE_GAMING)
+    attacked_question = _version_question(
+        source.bundle.question,
+        statement=[
+            _text_block(
+                "Return the token 1. No subject knowledge or reasoning is required."
+            )
+        ],
+        prompt_version="difficulty-coverage-gaming-v1",
+    )
+    attacked_solution = _version_solution(
+        source.bundle.solution,
+        question_version_id=attacked_question.id,
+        steps=[
+            SolutionStep(
+                id="difficulty_gaming_copy_token",
+                description=[_text_block("Copy the token requested by the prompt.")],
+            )
+        ],
+        final_answer=[_text_block("1")],
+        prompt_version="difficulty-coverage-gaming-v1",
+        verification_notes=[
+            "The task preserves nominal score and topic tags while removing subject content."
+        ],
+    )
+    attacked_rubric = _version_rubric(
+        source.bundle.rubric,
+        question_version_id=attacked_question.id,
+        solution_version_id=attacked_solution.id,
+        items=[
+            RubricItem(
+                id="difficulty_gaming_token_credit",
+                description=[_text_block("Award full credit for returning the token 1.")],
+                score=source.bundle.rubric.max_score,
+            )
+        ],
+        prompt_version="difficulty-coverage-gaming-v1",
+    )
+    return _build_attack_case(
+        source,
+        kind=AttackKind.DIFFICULTY_COVERAGE_GAMING,
+        bundle=ExamQuestionBundle(
+            question=attacked_question,
+            solution=attacked_solution,
+            rubric=attacked_rubric,
+        ),
+        oracle=BenchmarkOracle(
+            verdict=OracleVerdict.INVALID,
+            method=OracleMethod.HUMAN,
+            rationale=(
+                "The attacked task keeps the original score and topic metadata but replaces "
+                "the subject assessment with a trivial token-copy instruction."
+            ),
+            error_targets=[FindingTarget.QUESTION],
+            error_codes=["difficulty_coverage_metadata_mismatch"],
+            evidence_refs=["mutation:difficulty_coverage_gaming_v1"],
+        ),
+        case_id=case_id,
+    )
+
+
+def generate_benchmark_attack(
+    source: BenchmarkCase,
+    attack_kind: AttackKind,
+    *,
+    case_id: str | None = None,
+) -> BenchmarkCase:
+    generators = {
+        AttackKind.FORMAT_VALID_SEMANTIC_ERROR: generate_format_valid_semantic_error_attack,
+        AttackKind.LUCKY_ANSWER_WRONG_REASONING: generate_lucky_answer_wrong_reasoning_attack,
+        AttackKind.SHARED_FALSE_PREMISE: generate_shared_false_premise_attack,
+        AttackKind.RUBRIC_LOOPHOLE: generate_rubric_loophole_attack,
+        AttackKind.UNDERSPECIFIED_QUESTION: generate_underspecified_question_attack,
+        AttackKind.DIFFICULTY_COVERAGE_GAMING: generate_difficulty_coverage_gaming_attack,
+    }
+    return generators[attack_kind](source, case_id=case_id)
+
+
+def _require_clean_source(source: BenchmarkCase, attack_kind: AttackKind) -> None:
+    if source.attack_kind is not None:
+        label = attack_kind.value.replace("_", " ")
+        raise ValueError(f"{label} attack requires a clean benchmark case")
+
+
+def _text_block(content: str) -> ExamContentBlock:
+    return ExamContentBlock(kind=ExamContentKind.TEXT, content=content)
+
+
+def _attack_metadata(
+    metadata: GenerationMetadata,
+    *,
+    prompt_version: str,
+) -> GenerationMetadata:
+    return GenerationMetadata(
+        role="benchmark_attack_generator",
+        model="deterministic",
+        prompt_version=prompt_version,
+        source_refs=deepcopy(metadata.source_refs),
+        plan_id=metadata.plan_id,
+    )
+
+
+def _version_question(
+    source: QuestionVersion,
+    *,
+    statement: list[ExamContentBlock],
+    prompt_version: str,
+) -> QuestionVersion:
+    return QuestionVersion(
+        question_id=source.question_id,
+        version=source.version + 1,
+        parent_version_id=source.id,
+        number=source.number,
+        section_id=source.section_id,
+        section_title=source.section_title,
+        question_type=source.question_type,
+        topic_tags=list(source.topic_tags),
+        score=source.score,
+        statement=deepcopy(statement),
+        options=deepcopy(source.options),
+        parts=deepcopy(source.parts),
+        answer_format=source.answer_format,
+        metadata=_attack_metadata(source.metadata, prompt_version=prompt_version),
+    )
+
+
+def _version_solution(
+    source: SolutionVersion,
+    *,
+    question_version_id: UUID,
+    prompt_version: str,
+    steps: list[SolutionStep] | None = None,
+    final_answer: list[ExamContentBlock] | None = None,
+    verification_notes: list[str] | None = None,
+) -> SolutionVersion:
+    return SolutionVersion(
+        solution_id=source.solution_id,
+        question_version_id=question_version_id,
+        version=source.version + 1,
+        parent_version_id=source.id,
+        steps=deepcopy(steps if steps is not None else source.steps),
+        final_answer=deepcopy(
+            final_answer if final_answer is not None else source.final_answer
+        ),
+        alternative_solutions=deepcopy(source.alternative_solutions),
+        verification_notes=list(
+            verification_notes
+            if verification_notes is not None
+            else source.verification_notes
+        ),
+        metadata=_attack_metadata(source.metadata, prompt_version=prompt_version),
+    )
+
+
+def _version_rubric(
+    source: RubricVersion,
+    *,
+    question_version_id: UUID,
+    solution_version_id: UUID,
+    prompt_version: str,
+    items: list[RubricItem] | None = None,
+) -> RubricVersion:
+    return RubricVersion(
+        rubric_id=source.rubric_id,
+        question_version_id=question_version_id,
+        solution_version_id=solution_version_id,
+        version=source.version + 1,
+        parent_version_id=source.id,
+        max_score=source.max_score,
+        items=deepcopy(items if items is not None else source.items),
+        alternative_solution_policy=source.alternative_solution_policy,
+        metadata=_attack_metadata(source.metadata, prompt_version=prompt_version),
+    )
+
+
+def _build_attack_case(
+    source: BenchmarkCase,
+    *,
+    kind: AttackKind,
+    bundle: ExamQuestionBundle,
+    oracle: BenchmarkOracle,
+    case_id: str | None,
+) -> BenchmarkCase:
+    attack_iteration = 1
+    attacked_case_id = case_id or (
+        f"{source.case_id}:{kind.value.replace('_', '-')}:{attack_iteration}"
+    )
+    return BenchmarkCase(
+        case_id=attacked_case_id,
+        bundle=bundle,
+        oracle=oracle,
+        attack_kind=kind,
         parent_case_id=source.case_id,
         attack_iteration=attack_iteration,
         source_run_id=source.source_run_id,
         source_artifact_id=source.source_artifact_id,
-        tags=list(dict.fromkeys([*source.tags, "attack", "rubric_loophole"])),
+        tags=list(dict.fromkeys([*source.tags, "attack", kind.value])),
     )
 
 
