@@ -625,6 +625,8 @@ src/assessment_workbench/
   exam_workflow.py             exam-level review gates and targeted repair routing
   document_workflow.py         LaTeX, PDF compilation, inspection, page Artifacts
   benchmarking.py              oracle labels, controlled attacks, verifier metrics
+  benchmark_runner.py          resumable Oracle-blind LLM verifier execution
+  benchmark_export.py          RLVR episode and preference JSONL exporters
   storage.py                   SQLite RunStore and filesystem ArtifactStore
   web_api.py                   typed local HTTP and SSE interface
 
@@ -686,14 +688,46 @@ uv run assessment-workbench benchmark report \
 
 The report combines per-Verifier metrics, per-attack-family escape rates, disagreement AUROC, reward-candidate coverage, and best-of-N pressure curves. Individual `evaluate`, `disagreement`, and `pressure` commands remain available for focused analyses.
 
-The committed [synthetic fixture](examples/verifier-benchmark/README.md) exercises the complete flow without an LLM:
+Run the executable deterministic baselines:
 
 ```bash
-uv run assessment-workbench benchmark validate \
-  --cases examples/verifier-benchmark/cases.jsonl
+uv run assessment-workbench benchmark observe-baseline \
+  --cases benchmark/cases.jsonl \
+  --output benchmark/observations.baseline.jsonl
 ```
 
-Its `surface_checker` and `specialized_ensemble` results are deterministic rule-table outputs marked `model="synthetic-fixture"`. They validate replay and reporting only; they are not empirical evidence about real Verifiers.
+On the committed one-clean/six-attack [fixture](examples/verifier-benchmark/README.md), both `schema_only` and `structure` accept all attacks: recall `0.0`, attack success rate `1.0`, and disagreement AUROC `0.5`. This executable negative result demonstrates that structural validity alone is not semantic verification; the fixture is too small to support a general performance claim.
+
+Run an Oracle-blind LLM Verifier with bounded concurrency and resume-safe output:
+
+```bash
+uv run assessment-workbench benchmark observe-llm \
+  --cases benchmark/cases.jsonl \
+  --output benchmark/observations.llm.jsonl \
+  --verifier gemini_flash \
+  --model gemini-3.5-flash \
+  --concurrency 4 \
+  --workspace ./workspaces/demo
+```
+
+The LLM receives only the Bundle and evaluation contract, never `case_id`, `attack_kind`, or Oracle fields. Successful cases are atomically persisted as they finish; rerunning skips matching verifier/trial/version bindings and retries only missing cases.
+
+Export replayable RLVR environments and clean-versus-attacked preference pairs:
+
+```bash
+uv run assessment-workbench benchmark export-episodes \
+  --cases benchmark/cases.jsonl \
+  --observations benchmark/observations.llm.jsonl \
+  --output benchmark/episodes.jsonl
+
+uv run assessment-workbench benchmark export-preferences \
+  --cases benchmark/cases.jsonl \
+  --observations benchmark/observations.llm.jsonl \
+  --verifier gemini_flash \
+  --output benchmark/preferences.jsonl
+```
+
+The committed `synthetic` observations remain separately marked `model="synthetic-fixture"` and validate reporting behavior only.
 
 | Metric | Definition |
 | --- | --- |
@@ -723,7 +757,7 @@ Assessment generation is useful for verifier research because outputs can appear
 | Difficulty gaming | trivial or impossible questions satisfy nominal metadata | solver-based calibration and whole-exam difficulty checks |
 | Recovery exploitation | retries mutate unrelated accepted content or replay expensive calls | immutable versions, target resolution, checkpoint and replacement history |
 
-The repository now includes the benchmark contracts, six controlled attack generators, offline metrics, and a synthetic reproducibility fixture. It does **not** yet include an expert-validated adversarial corpus, real-model benchmark results, or a measured reduction in reward-hacking attack success rate.
+The repository now includes benchmark contracts, six controlled attack generators, deterministic baselines, a resumable LLM evaluation runner, offline metrics, and RLVR episode/preference exporters. It does **not** yet include an expert-validated adversarial corpus, a multi-seed real-model result table, or a measured reduction in reward-hacking attack success rate.
 
 ## RLVR and Reward-Hacking Evaluation Roadmap
 

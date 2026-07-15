@@ -625,6 +625,8 @@ src/assessment_workbench/
   exam_workflow.py             整卷审核门禁与定向修复路由
   document_workflow.py         LaTeX、PDF 编译、检查、页面 Artifact
   benchmarking.py              Oracle 标签、受控攻击与 Verifier 指标
+  benchmark_runner.py          可恢复的 Oracle-blind LLM Verifier 执行器
+  benchmark_export.py          RLVR Episode 与 Preference JSONL 导出器
   storage.py                   SQLite RunStore 与文件系统 ArtifactStore
   web_api.py                   类型化本地 HTTP 与 SSE 接口
 
@@ -686,14 +688,46 @@ uv run assessment-workbench benchmark report \
 
 报告统一包含各 Verifier 指标、按攻击类别拆分的逃逸率、disagreement AUROC、reward-candidate 覆盖率和 best-of-N pressure curve。`evaluate`、`disagreement` 与 `pressure` 命令仍可用于单项分析。
 
-仓库内的 [synthetic fixture](examples/verifier-benchmark/README.md) 无需调用 LLM 即可验证完整数据流：
+运行可执行的确定性 baseline：
 
 ```bash
-uv run assessment-workbench benchmark validate \
-  --cases examples/verifier-benchmark/cases.jsonl
+uv run assessment-workbench benchmark observe-baseline \
+  --cases benchmark/cases.jsonl \
+  --output benchmark/observations.baseline.jsonl
 ```
 
-其中 `surface_checker` 与 `specialized_ensemble` 的结果来自确定性规则表，并明确记录为 `model="synthetic-fixture"`。这些数据只验证重放与报告链路，不是关于真实 Verifier 效果的实验证据。
+在仓库内一条 clean、六条 attack 的 [fixture](examples/verifier-benchmark/README.md) 上，`schema_only` 与 `structure` 都接受了全部攻击：Recall `0.0`、Attack Success Rate `1.0`、Disagreement AUROC `0.5`。这个可执行的负结果说明结构合法性不等于语义验证；fixture 规模不足以支撑一般化效果声明。
+
+使用受限并发和可断点续跑输出运行 Oracle-blind LLM Verifier：
+
+```bash
+uv run assessment-workbench benchmark observe-llm \
+  --cases benchmark/cases.jsonl \
+  --output benchmark/observations.llm.jsonl \
+  --verifier gemini_flash \
+  --model gemini-3.5-flash \
+  --concurrency 4 \
+  --workspace ./workspaces/demo
+```
+
+LLM 只接收 Bundle 与 evaluation contract，不会看到 `case_id`、`attack_kind` 或 Oracle 字段。成功 case 在完成时立即原子落盘；重复运行会跳过 verifier/trial/version 均匹配的记录，只重试缺失 case。
+
+导出可重放 RLVR Environment 和 clean-versus-attacked Preference Pair：
+
+```bash
+uv run assessment-workbench benchmark export-episodes \
+  --cases benchmark/cases.jsonl \
+  --observations benchmark/observations.llm.jsonl \
+  --output benchmark/episodes.jsonl
+
+uv run assessment-workbench benchmark export-preferences \
+  --cases benchmark/cases.jsonl \
+  --observations benchmark/observations.llm.jsonl \
+  --verifier gemini_flash \
+  --output benchmark/preferences.jsonl
+```
+
+仓库中保留的 `synthetic` Observation 会单独标记为 `model="synthetic-fixture"`，只用于验证报告链路。
 
 | 指标 | 定义 |
 | --- | --- |
@@ -723,7 +757,7 @@ uv run assessment-workbench benchmark validate \
 | 难度投机 | 过易或不可解题目满足名义 metadata | 基于 Solver 的难度校准与整卷难度检查 |
 | 恢复机制投机 | 重试时修改无关已接受内容，或重复昂贵调用 | 不可变版本、目标解析、checkpoint 与 replacement history |
 
-仓库现在已经包含 Benchmark contract、六类受控攻击生成器、离线指标和 synthetic reproducibility fixture。但目前仍没有专家校验的对抗语料、真实模型 Benchmark 结果，也没有测得 Reward-Hacking Attack Success Rate 的下降幅度。
+仓库现在已经包含 Benchmark contract、六类受控攻击生成器、确定性 baseline、可恢复 LLM 评测 runner、离线指标以及 RLVR Episode/Preference exporter。但目前仍没有专家校验的对抗语料、多随机种子真实模型结果表，也没有测得 Reward-Hacking Attack Success Rate 的下降幅度。
 
 ## RLVR 与 Reward-Hacking 评测路线图
 
