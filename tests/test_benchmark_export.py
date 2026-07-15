@@ -15,8 +15,10 @@ from assessment_workbench.benchmark_export import (
 from assessment_workbench.benchmarking import (
     DeterministicBaseline,
     calculate_benchmark_experiment_report,
+    calculate_benchmark_multi_trial_report,
     generate_deterministic_baseline_observations,
     read_benchmark_cases,
+    read_verifier_observations,
     write_verifier_observations,
 )
 from assessment_workbench.cli import app
@@ -196,3 +198,65 @@ def test_committed_baseline_artifacts_replay_exactly() -> None:
     assert [item.model_dump(mode="json") for item in episodes] == committed_episodes
     assert [item.model_dump(mode="json") for item in preferences] == committed_preferences
     assert report.model_dump(mode="json") == committed_report
+
+
+def test_committed_gemini_flash_artifacts_replay_exactly() -> None:
+    fixture_root = Path(__file__).parents[1] / "examples" / "verifier-benchmark"
+    cases = read_benchmark_cases(fixture_root / "cases.jsonl")
+    observations = read_verifier_observations(
+        fixture_root / "observations.gemini-flash.jsonl"
+    )
+
+    assert len(observations) == 21
+    multi_trial_report = calculate_benchmark_multi_trial_report(
+        cases,
+        observations,
+        verifiers=["gemini_flash"],
+    )
+    committed_multi_trial = json.loads(
+        (fixture_root / "report.gemini-flash.multi-trial.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert multi_trial_report.model_dump(mode="json") == committed_multi_trial
+
+    episodes = build_rlvr_episodes(cases, observations)
+    committed_episodes = [
+        json.loads(line)
+        for line in (fixture_root / "episodes.gemini-flash.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [item.model_dump(mode="json") for item in episodes] == committed_episodes
+
+    for trial in (1, 2, 3):
+        report = calculate_benchmark_experiment_report(
+            cases,
+            observations,
+            verifiers=["gemini_flash"],
+            trial=trial,
+        )
+        committed_report = json.loads(
+            (fixture_root / f"report.gemini-flash.trial-{trial}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert report.model_dump(mode="json") == committed_report
+
+        preferences = build_rlvr_preferences(
+            cases,
+            observations,
+            verifiers=["gemini_flash"],
+            trial=trial,
+        )
+        committed_preferences = [
+            json.loads(line)
+            for line in (
+                fixture_root / f"preferences.gemini-flash.trial-{trial}.jsonl"
+            )
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert [
+            item.model_dump(mode="json") for item in preferences
+        ] == committed_preferences

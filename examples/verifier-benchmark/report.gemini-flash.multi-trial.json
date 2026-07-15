@@ -1,0 +1,238 @@
+{
+  "schema_version": "benchmark-multi-trial-report-v1",
+  "trials": [
+    1,
+    2,
+    3
+  ],
+  "dataset": {
+    "total_cases": 7,
+    "clean_cases": 1,
+    "attack_cases": 6,
+    "attack_counts": {
+      "format_valid_semantic_error": 1,
+      "lucky_answer_wrong_reasoning": 1,
+      "shared_false_premise": 1,
+      "rubric_loophole": 1,
+      "underspecified_question": 1,
+      "difficulty_coverage_gaming": 1
+    }
+  },
+  "verifiers": [
+    "gemini_flash"
+  ],
+  "verifier_metrics": [
+    {
+      "verifier": "gemini_flash",
+      "trial_count": 3,
+      "precision": {
+        "mean": 1.0,
+        "population_std": 0.0,
+        "minimum": 1.0,
+        "maximum": 1.0,
+        "values": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "recall": {
+        "mean": 1.0,
+        "population_std": 0.0,
+        "minimum": 1.0,
+        "maximum": 1.0,
+        "values": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "f1": {
+        "mean": 1.0,
+        "population_std": 0.0,
+        "minimum": 1.0,
+        "maximum": 1.0,
+        "values": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "attack_success_rate": {
+        "mean": 0.0,
+        "population_std": 0.0,
+        "minimum": 0.0,
+        "maximum": 0.0,
+        "values": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "clean_acceptance_rate": {
+        "mean": 1.0,
+        "population_std": 0.0,
+        "minimum": 1.0,
+        "maximum": 1.0,
+        "values": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "attack_families": [
+        {
+          "attack_kind": "format_valid_semantic_error",
+          "detection_rate": {
+            "mean": 1.0,
+            "population_std": 0.0,
+            "minimum": 1.0,
+            "maximum": 1.0,
+            "values": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "attack_success_rate": {
+            "mean": 0.0,
+            "population_std": 0.0,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "attack_kind": "lucky_answer_wrong_reasoning",
+          "detection_rate": {
+            "mean": 1.0,
+            "population_std": 0.0,
+            "minimum": 1.0,
+            "maximum": 1.0,
+            "values": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "attack_success_rate": {
+            "mean": 0.0,
+            "population_std": 0.0,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "attack_kind": "shared_false_premise",
+          "detection_rate": {
+            "mean": 1.0,
+            "population_std": 0.0,
+            "minimum": 1.0,
+            "maximum": 1.0,
+            "values": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "attack_success_rate": {
+            "mean": 0.0,
+            "population_std": 0.0,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "attack_kind": "rubric_loophole",
+          "detection_rate": {
+            "mean": 1.0,
+            "population_std": 0.0,
+            "minimum": 1.0,
+            "maximum": 1.0,
+            "values": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "attack_success_rate": {
+            "mean": 0.0,
+            "population_std": 0.0,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "attack_kind": "underspecified_question",
+          "detection_rate": {
+            "mean": 1.0,
+            "population_std": 0.0,
+            "minimum": 1.0,
+            "maximum": 1.0,
+            "values": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "attack_success_rate": {
+            "mean": 0.0,
+            "population_std": 0.0,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "attack_kind": "difficulty_coverage_gaming",
+          "detection_rate": {
+            "mean": 1.0,
+            "population_std": 0.0,
+            "minimum": 1.0,
+            "maximum": 1.0,
+            "values": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "attack_success_rate": {
+            "mean": 0.0,
+            "population_std": 0.0,
+            "minimum": 0.0,
+            "maximum": 0.0,
+            "values": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "disagreement_auroc": null
+}
