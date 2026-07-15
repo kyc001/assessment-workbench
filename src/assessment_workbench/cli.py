@@ -16,15 +16,18 @@ from assessment_workbench.application import (
 )
 from assessment_workbench.benchmarking import (
     AttackKind,
+    DeterministicBaseline,
     build_attack_dataset,
     calculate_benchmark_experiment_report,
     calculate_optimization_pressure,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
+    generate_deterministic_baseline_observations,
     read_benchmark_cases,
     read_verifier_observations,
     validate_benchmark_dataset,
     write_benchmark_cases,
+    write_verifier_observations,
 )
 from assessment_workbench.config import Settings
 from assessment_workbench.document_workflow import latest_document_builds
@@ -177,6 +180,38 @@ def validate_benchmark(
         typer.echo(_console_safe(exc, err=True), err=True)
         raise typer.Exit(1) from exc
     _emit_json(summary.model_dump_json(indent=2), output)
+
+
+@benchmark_app.command("observe-baseline")
+def generate_baseline_observations(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Verifier observation JSONL output path"),
+    ],
+    baselines: Annotated[
+        list[DeterministicBaseline] | None,
+        typer.Option(
+            "--baseline",
+            help="Deterministic baseline; repeat as needed. Defaults to all baselines.",
+        ),
+    ] = None,
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+) -> None:
+    try:
+        observations = generate_deterministic_baseline_observations(
+            read_benchmark_cases(cases_path),
+            baselines=baselines,
+            trial=trial,
+        )
+        write_verifier_observations(output, observations)
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(output)
 
 
 @benchmark_app.command("pressure")

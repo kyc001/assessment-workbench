@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import Field, ValidationError, model_validator
 
+from assessment_workbench.capabilities import load_default_capability_catalog
 from assessment_workbench.domain import (
     ExamContentBlock,
     ExamContentKind,
@@ -38,6 +39,11 @@ class AttackKind(StrEnum):
     RUBRIC_LOOPHOLE = "rubric_loophole"
     UNDERSPECIFIED_QUESTION = "underspecified_question"
     DIFFICULTY_COVERAGE_GAMING = "difficulty_coverage_gaming"
+
+
+class DeterministicBaseline(StrEnum):
+    SCHEMA_ONLY = "schema_only"
+    STRUCTURE = "structure"
 
 
 class OracleVerdict(StrEnum):
@@ -664,6 +670,69 @@ def validate_benchmark_dataset(
         attack_cases=len(attacked_cases),
         attack_counts=attack_counts,
     )
+
+
+def generate_deterministic_baseline_observations(
+    cases: Iterable[BenchmarkCase],
+    *,
+    baselines: Iterable[DeterministicBaseline] | None = None,
+    trial: int = 1,
+) -> list[VerifierObservation]:
+    materialized_cases = list(cases)
+    validate_benchmark_dataset(materialized_cases)
+    selected_baselines = (
+        list(baselines) if baselines is not None else list(DeterministicBaseline)
+    )
+    if not selected_baselines:
+        raise ValueError("deterministic observation generation requires a baseline")
+    if len(selected_baselines) != len(set(selected_baselines)):
+        raise ValueError("deterministic baselines must be unique")
+    if trial < 1:
+        raise ValueError("deterministic observation trial must be at least 1")
+
+    structure_handler = None
+    if DeterministicBaseline.STRUCTURE in selected_baselines:
+        definition = load_default_capability_catalog().reviewers.require("structure")
+        structure_handler = definition.handler
+        if structure_handler is None:
+            raise RuntimeError("structure baseline requires a deterministic reviewer handler")
+
+    observations: list[VerifierObservation] = []
+    for case in materialized_cases:
+        for baseline in selected_baselines:
+            if baseline is DeterministicBaseline.SCHEMA_ONLY:
+                report = ReviewReport(
+                    reviewer=baseline.value,
+                    passed=True,
+                    summary=(
+                        "Schema-only baseline accepts every case that passes the typed "
+                        "benchmark contract."
+                    ),
+                )
+            else:
+                assert structure_handler is not None
+                report = structure_handler(case.bundle).model_copy(
+                    update={"reviewer": baseline.value}
+                )
+            observations.append(
+                VerifierObservation(
+                    observation_id=(
+                        f"deterministic:{baseline.value}:trial-{trial}:{case.case_id}"
+                    ),
+                    case_id=case.case_id,
+                    trial=trial,
+                    question_version_id=case.bundle.question.id,
+                    solution_version_id=case.bundle.solution.id,
+                    rubric_version_id=case.bundle.rubric.id,
+                    report=report,
+                    confidence=1.0,
+                    reward_candidate=1.0 if report.passed else 0.0,
+                    model="deterministic-baseline",
+                    prompt_version=f"{baseline.value}-v1",
+                )
+            )
+    _validate_observation_ids(observations)
+    return observations
 
 
 def _require_clean_source(source: BenchmarkCase, attack_kind: AttackKind) -> None:

@@ -10,6 +10,7 @@ from assessment_workbench.benchmarking import (
     AttackKind,
     BenchmarkCase,
     BenchmarkOracle,
+    DeterministicBaseline,
     OracleMethod,
     OracleVerdict,
     VerifierObservation,
@@ -19,6 +20,7 @@ from assessment_workbench.benchmarking import (
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
     generate_benchmark_attack,
+    generate_deterministic_baseline_observations,
     generate_difficulty_coverage_gaming_attack,
     generate_format_valid_semantic_error_attack,
     generate_lucky_answer_wrong_reasoning_attack,
@@ -470,6 +472,61 @@ def test_verifier_observation_jsonl_round_trip(tmp_path: Path) -> None:
     restored = read_verifier_observations(path)
 
     assert restored == [observation]
+
+
+def test_deterministic_baselines_generate_version_bound_observations() -> None:
+    dataset = build_attack_dataset([_clean_case("baseline-observations")])
+
+    observations = generate_deterministic_baseline_observations(dataset)
+
+    assert len(observations) == len(dataset) * len(DeterministicBaseline)
+    schema_observations = [
+        observation
+        for observation in observations
+        if observation.report.reviewer == DeterministicBaseline.SCHEMA_ONLY.value
+    ]
+    structure_observations = [
+        observation
+        for observation in observations
+        if observation.report.reviewer == DeterministicBaseline.STRUCTURE.value
+    ]
+    assert all(observation.report.passed for observation in schema_observations)
+    assert all(observation.report.passed for observation in structure_observations)
+    for case in dataset:
+        matching = [
+            observation
+            for observation in observations
+            if observation.case_id == case.case_id
+        ]
+        assert len(matching) == 2
+        assert all(
+            observation.question_version_id == case.bundle.question.id
+            for observation in matching
+        )
+        assert all(
+            observation.solution_version_id == case.bundle.solution.id
+            for observation in matching
+        )
+        assert all(
+            observation.rubric_version_id == case.bundle.rubric.id
+            for observation in matching
+        )
+
+
+def test_deterministic_baseline_report_exposes_weak_baseline_asr() -> None:
+    dataset = build_attack_dataset([_clean_case("baseline-report")])
+    observations = generate_deterministic_baseline_observations(dataset)
+
+    report = calculate_benchmark_experiment_report(
+        dataset,
+        observations,
+        verifiers=[baseline.value for baseline in DeterministicBaseline],
+    )
+
+    assert [metrics.attack_success_rate for metrics in report.verifier_metrics] == [1.0, 1.0]
+    assert report.disagreement is not None
+    assert report.disagreement.mean_attack_disagreement == 0.0
+    assert len(report.optimization_pressure) == 2
 
 
 def test_verifier_metrics_measure_detection_and_attack_success() -> None:
@@ -924,6 +981,31 @@ def test_benchmark_validate_cli_outputs_dataset_summary(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["total_cases"] == 2
     assert payload["attack_counts"][AttackKind.RUBRIC_LOOPHOLE.value] == 1
+
+
+def test_benchmark_observe_baseline_cli_writes_all_baselines(tmp_path: Path) -> None:
+    dataset = build_attack_dataset([_clean_case("baseline-cli")])
+    cases_path = write_benchmark_cases(tmp_path / "cases.jsonl", dataset)
+    output_path = tmp_path / "baseline-observations.jsonl"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "observe-baseline",
+            "--cases",
+            str(cases_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    observations = read_verifier_observations(output_path)
+    assert len(observations) == len(dataset) * len(DeterministicBaseline)
+    assert {observation.report.reviewer for observation in observations} == {
+        baseline.value for baseline in DeterministicBaseline
+    }
 
 
 def test_benchmark_pressure_cli_outputs_asr_curve(tmp_path: Path) -> None:
