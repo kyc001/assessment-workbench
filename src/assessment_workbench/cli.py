@@ -14,6 +14,12 @@ from assessment_workbench.application import (
     open_workspace,
     publish_question_bundle,
 )
+from assessment_workbench.benchmark_export import (
+    build_rlvr_episodes,
+    build_rlvr_preferences,
+    write_rlvr_episodes,
+    write_rlvr_preferences,
+)
 from assessment_workbench.benchmark_runner import run_llm_verifier
 from assessment_workbench.benchmarking import (
     AttackKind,
@@ -314,6 +320,79 @@ def generate_llm_verifier_observations(
         for case_id, error in sorted(result.failures.items()):
             typer.echo(_console_safe(f"{case_id}: {error}", err=True), err=True)
         raise typer.Exit(1)
+    typer.echo(output)
+
+
+@benchmark_app.command("export-episodes")
+def export_rlvr_episodes(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    output: Annotated[Path, typer.Option("--output", help="RLVR episode JSONL path")],
+    observations_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--observations",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ] = None,
+) -> None:
+    try:
+        observations = (
+            read_verifier_observations(observations_path)
+            if observations_path is not None
+            else []
+        )
+        write_rlvr_episodes(
+            output,
+            build_rlvr_episodes(read_benchmark_cases(cases_path), observations),
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(output)
+
+
+@benchmark_app.command("export-preferences")
+def export_rlvr_preferences(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    observations_path: Annotated[
+        Path,
+        typer.Option(
+            "--observations",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    output: Annotated[Path, typer.Option("--output", help="RLVR preference JSONL path")],
+    verifiers: Annotated[
+        list[str] | None,
+        typer.Option("--verifier", help="Verifier ID; repeat or omit to infer all"),
+    ] = None,
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+) -> None:
+    try:
+        write_rlvr_preferences(
+            output,
+            build_rlvr_preferences(
+                read_benchmark_cases(cases_path),
+                read_verifier_observations(observations_path),
+                verifiers=verifiers,
+                trial=trial,
+            ),
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
     typer.echo(output)
 
 
