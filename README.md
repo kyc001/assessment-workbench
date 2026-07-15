@@ -110,6 +110,56 @@ Download the actual artifacts:
 
 These are acceptance-run measurements, not a multi-seed benchmark. Mathematical correctness has not yet been independently expert-rated; the current evidence establishes workflow completion, artifact integrity, and render quality.
 
+## Real Case Walkthrough: Gaokao Question 19
+
+The following is not a toy verifier fixture. It is the final 17-point analytic-geometry problem from the committed 19-question Gaokao mathematics run. The task combines ellipse identification, line-conic elimination, Vieta's formulas, an area transformation, derivative-based optimization, and a separate vertical-line boundary case.
+
+![Rendered Gaokao mathematics Question 19](docs/assets/demo/gaokao-q19-question.png)
+
+The accepted result came from one isolated child run (`1b04a099-8550-4922-b78f-14fc54334533`) and preserved the complete role-separated trajectory:
+
+```mermaid
+flowchart LR
+    Plan["Question Planner\nhard · 17 points · 20 min"] --> Writer["Question Writer\n3 parts: 5 + 6 + 6"]
+    Writer --> Solver["Independent Solver\n10 derivation steps"]
+    Solver --> Rubric["Rubric Builder\n9 scoring items · 17 points"]
+    Rubric --> Review["Verifier ensemble\n5 LLM reviewers + 1 deterministic check"]
+    Review --> Arbiter["Arbiter\npass_with_warnings"]
+    Arbiter --> Release["Published views\nquestion · solution · rubric"]
+
+    Review -. "one non-blocking finding" .-> Feedback["Make Δ = 1600(25k²+12) > 0 explicit"]
+```
+
+| Stage | Real output retained by the run |
+| --- | --- |
+| Question Writer | A three-part constructed-response problem with a uniquely checkable target: derive `x²/25 + y²/16 = 1`, express the area as a function of line slope, and prove the global maximum. |
+| Independent Solver | Ten explicit steps. The solver eliminated `y`, used Vieta's formulas, reduced the triangle area to `|x₁-x₂|`, derived `S = 40√(25k²+12)/(25k²+16)`, proved monotonicity after `t = 25k²`, and checked the excluded vertical line separately. |
+| Rubric Builder | Nine dependency-aware scoring items totaling 17 points, including partial-credit conditions and carry-forward rules for earlier algebraic errors. |
+| Verifier ensemble | Mathematical, subject, solvability, rubric, and pedagogical reviewers were launched within 214 ms, alongside the deterministic structure check. All six passed the Bundle. |
+| Structured feedback | The subject reviewer emitted one non-blocking warning: the solution says the quadratic discriminant is positive but should explicitly show `Δ = 1600(25k²+12) > 0`. |
+| Arbiter | Returned `pass_with_warnings`, routed the precise suggestion to the Solver, and avoided an unnecessary regeneration because the omission did not affect correctness or score reliability. |
+| Runtime evidence | Nine successful model calls, immutable Question/Solution/Rubric version bindings, and a 225.6-second child-run wall time from creation to `DONE`. |
+
+The final answer was `S_max = 5√3`, attained by `AB: y = 2`; the vertical line `x = 0` gives zero area. The important research signal is not only that the answer was accepted, but that the run retained **who checked it, what evidence they produced, which component the feedback targeted, and why the Arbiter chose pass instead of retry**.
+
+<details>
+<summary>Inspect the generated worked solution and scoring rubric</summary>
+
+<table>
+  <tr>
+    <td width="50%" align="center"><strong>Independent Solver output</strong></td>
+    <td width="50%" align="center"><strong>Rubric Builder output</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/demo/gaokao-q19-solution.png" alt="Generated ten-step solution for Gaokao Question 19"></td>
+    <td><img src="docs/assets/demo/gaokao-q19-rubric.png" alt="Generated nine-item scoring rubric for Gaokao Question 19"></td>
+  </tr>
+</table>
+
+</details>
+
+The screenshots above are cropped directly from the committed [student paper](examples/gaokao-mathematics/artifacts/exam-questions.pdf), [worked solutions](examples/gaokao-mathematics/artifacts/exam-solutions.pdf), and [scoring rubric](examples/gaokao-mathematics/artifacts/exam-rubric.pdf). They are generated artifacts from the preserved run, not reconstructed mockups.
+
 ## Design Principles
 
 1. **Reasoning is separated from control.** Agents propose typed outputs; the runtime decides whether those outputs can advance the workflow.

@@ -110,6 +110,56 @@ flowchart LR
 
 这些数字来自一次验收运行，不是多随机种子 Benchmark。数学正确性尚未经过独立专家评分；当前证据证明的是工作流完成、Artifact 完整性和渲染质量。
 
+## 真实案例复盘：高考数学第 19 题
+
+下面展示的不是用于冒烟测试的简单代数 fixture，而是已提交 19 题高考数学整卷中的最后一道 17 分解析几何题。它同时涉及椭圆方程确定、直线与圆锥曲线联立、韦达定理、面积变换、导数最值证明和竖直直线边界情形。
+
+![渲染后的高考数学第 19 题](docs/assets/demo/gaokao-q19-question.png)
+
+这道题来自一个独立子运行（`1b04a099-8550-4922-b78f-14fc54334533`），完整保留了角色隔离的生成与评测轨迹：
+
+```mermaid
+flowchart LR
+    Plan["Question Planner\n难题 · 17 分 · 20 分钟"] --> Writer["Question Writer\n3 个分问：5 + 6 + 6"]
+    Writer --> Solver["Independent Solver\n10 步推导"]
+    Solver --> Rubric["Rubric Builder\n9 个评分项 · 共 17 分"]
+    Rubric --> Review["Verifier ensemble\n5 个 LLM Reviewer + 1 个确定性检查"]
+    Review --> Arbiter["Arbiter\npass_with_warnings"]
+    Arbiter --> Release["发布视图\n试题 · 解答 · Rubric"]
+
+    Review -. "1 条非阻断 finding" .-> Feedback["显式写出 Δ = 1600(25k²+12) > 0"]
+```
+
+| 阶段 | 运行中真实保留的输出 |
+| --- | --- |
+| Question Writer | 生成包含三个分问的解答题，目标可唯一验证：推出 `x²/25 + y²/16 = 1`，把面积表示为斜率函数，并证明全局最大值。 |
+| Independent Solver | 生成 10 个显式步骤：消去 `y`、使用韦达定理、将三角形面积化为 `|x₁-x₂|`、得到 `S = 40√(25k²+12)/(25k²+16)`、通过 `t = 25k²` 判断单调性，并单独检查被参数化排除的竖直直线。 |
+| Rubric Builder | 构造 9 个具有依赖关系的评分项，总分 17 分；包含部分分条件，以及前序代数错误的 carry-forward 规则。 |
+| Verifier ensemble | Mathematical、Subject、Solvability、Rubric、Pedagogical 五个 Reviewer 在 214 ms 内并发启动，同时执行确定性 Structure 检查；六路检查全部通过。 |
+| 结构化反馈 | Subject Reviewer 给出一条非阻断 warning：解答声称二次方程判别式恒正，但示范解答应显式写出 `Δ = 1600(25k²+12) > 0`。 |
+| Arbiter | 返回 `pass_with_warnings`，把精确建议路由给 Solver；由于该遗漏不影响答案正确性和评分可靠性，因此没有触发无意义的重新生成。 |
+| 运行证据 | 9 次模型调用全部成功，Question/Solution/Rubric 版本绑定不可变；子运行从创建到 `DONE` 的墙钟时间为 225.6 秒。 |
+
+最终答案为 `S_max = 5√3`，在 `AB: y = 2` 时取得；竖直直线 `x = 0` 对应面积为零。这里真正有研究价值的信号不只是“答案通过”，还包括：**谁检查了它、Reviewer 给出了什么证据、反馈指向哪个组件，以及 Arbiter 为什么选择 pass 而不是 retry**。
+
+<details>
+<summary>查看生成的完整解答与评分细则</summary>
+
+<table>
+  <tr>
+    <td width="50%" align="center"><strong>Independent Solver 输出</strong></td>
+    <td width="50%" align="center"><strong>Rubric Builder 输出</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/demo/gaokao-q19-solution.png" alt="高考数学第 19 题的十步解答"></td>
+    <td><img src="docs/assets/demo/gaokao-q19-rubric.png" alt="高考数学第 19 题的九项评分细则"></td>
+  </tr>
+</table>
+
+</details>
+
+以上截图直接裁切自仓库中提交的[试题卷](examples/gaokao-mathematics/artifacts/exam-questions.pdf)、[答案卷](examples/gaokao-mathematics/artifacts/exam-solutions.pdf)和[评分细则](examples/gaokao-mathematics/artifacts/exam-rubric.pdf)。它们是保留运行生成的真实产物，不是重新制作的示意图。
+
 ## 设计原则
 
 1. **推理与控制分离。** Agent 提交类型化结果；运行时决定结果能否推动工作流前进。
