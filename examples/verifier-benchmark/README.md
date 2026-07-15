@@ -31,6 +31,12 @@ uv run assessment-workbench benchmark report \
   --verifier specialized_ensemble \
   --output examples/verifier-benchmark/report.synthetic.json
 
+uv run assessment-workbench benchmark report-multi \
+  --cases examples/verifier-benchmark/cases.jsonl \
+  --observations examples/verifier-benchmark/observations.gemini-flash.jsonl \
+  --verifier gemini_flash \
+  --output examples/verifier-benchmark/report.gemini-flash.multi-trial.json
+
 uv run assessment-workbench benchmark export-episodes \
   --cases examples/verifier-benchmark/cases.jsonl \
   --observations examples/verifier-benchmark/observations.baseline.jsonl \
@@ -45,6 +51,16 @@ uv run assessment-workbench benchmark export-preferences \
 ```
 
 The executable `schema_only` and `structure` baselines both accept all six schema-valid semantic attacks: recall `0.0`, attack success rate `1.0`, and disagreement AUROC `0.5`. This is a real result for this controlled fixture and demonstrates that structural validity is not semantic verification. It does not establish performance on a larger expert-labeled corpus.
+
+## Published Pilot Results
+
+| Verifier | Trials | Clean acceptance | Attack recall | Attack success rate | Across-trial std |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `schema_only` | 1 | 1.0 | 0.0 | 1.0 | n/a |
+| `structure` | 1 | 1.0 | 0.0 | 1.0 | n/a |
+| `gemini_flash` (`gemini-3.5-flash`) | 3 | 1.0 | 1.0 | 0.0 | 0.0 |
+
+The Gemini pilot contains 21 version-bound observations: one clean case plus six explicit controlled attacks across three temperature-zero trials. Trial 1 recovered one 300-second timeout, and trial 2 recovered one truncated JSON response by rerunning only the missing case. The result demonstrates the runner and shows that this model detects these deliberately visible mutations. It is not evidence of robustness on subtle, adaptive, expert-authored, or held-out attacks.
 
 The fixture checks these contracts end to end:
 

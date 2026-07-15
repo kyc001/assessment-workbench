@@ -712,6 +712,16 @@ uv run assessment-workbench benchmark observe-llm \
 
 LLM 只接收 Bundle 与 evaluation contract，不会看到 `case_id`、`attack_kind` 或 Oracle 字段。成功 case 在完成时立即原子落盘；重复运行会跳过 verifier/trial/version 均匹配的记录，只重试缺失 case。
 
+仓库已提交的 Gemini Flash pilot 包含三个 temperature-zero trial、共 21 条 Observation：
+
+| Verifier | Trials | Clean Acceptance | Attack Recall | Attack Success Rate | 跨 Trial 标准差 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `schema_only` | 1 | 1.0 | 0.0 | 1.0 | n/a |
+| `structure` | 1 | 1.0 | 0.0 | 1.0 | n/a |
+| `gemini_flash` (`gemini-3.5-flash`) | 3 | 1.0 | 1.0 | 0.0 | 0.0 |
+
+其中一个 trial 出现 300 秒超时，另一个 trial 返回截断 JSON；两者都通过只补跑缺失 case 完成恢复。这六个攻击来自同一个 clean algebra Bundle，而且变异较为显式，因此 Gemini 的满分只能证明 runner 可用且该 pilot 可解，不能证明对广义 Reward Hacking 具有鲁棒性。
+
 导出可重放 RLVR Environment 和 clean-versus-attacked Preference Pair：
 
 ```bash
@@ -757,7 +767,7 @@ uv run assessment-workbench benchmark export-preferences \
 | 难度投机 | 过易或不可解题目满足名义 metadata | 基于 Solver 的难度校准与整卷难度检查 |
 | 恢复机制投机 | 重试时修改无关已接受内容，或重复昂贵调用 | 不可变版本、目标解析、checkpoint 与 replacement history |
 
-仓库现在已经包含 Benchmark contract、六类受控攻击生成器、确定性 baseline、可恢复 LLM 评测 runner、离线指标以及 RLVR Episode/Preference exporter。但目前仍没有专家校验的对抗语料、多随机种子真实模型结果表，也没有测得 Reward-Hacking Attack Success Rate 的下降幅度。
+仓库现在已经包含 Benchmark contract、六类受控攻击生成器、确定性 baseline、可恢复 LLM 评测 runner、三 trial Gemini Flash pilot、离线指标以及 RLVR Episode/Preference exporter。但目前仍没有专家校验的对抗语料、在 held-out adaptive attack 上进行的匹配多模型/多随机种子实验，也没有测得 Reward-Hacking Attack Success Rate 的下降幅度。
 
 ## RLVR 与 Reward-Hacking 评测路线图
 

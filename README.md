@@ -712,6 +712,16 @@ uv run assessment-workbench benchmark observe-llm \
 
 The LLM receives only the Bundle and evaluation contract, never `case_id`, `attack_kind`, or Oracle fields. Successful cases are atomically persisted as they finish; rerunning skips matching verifier/trial/version bindings and retries only missing cases.
 
+The committed Gemini Flash pilot contains 21 observations over three temperature-zero trials:
+
+| Verifier | Trials | Clean acceptance | Attack recall | Attack success rate | Across-trial std |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `schema_only` | 1 | 1.0 | 0.0 | 1.0 | n/a |
+| `structure` | 1 | 1.0 | 0.0 | 1.0 | n/a |
+| `gemini_flash` (`gemini-3.5-flash`) | 3 | 1.0 | 1.0 | 0.0 | 0.0 |
+
+One trial recovered a 300-second timeout and another recovered a truncated JSON response by rerunning only the missing case. These six attacks are deliberately explicit and come from one clean algebra Bundle, so the perfect Gemini score is evidence that the runner works and this pilot is solvable, not evidence of broad reward-hacking robustness.
+
 Export replayable RLVR environments and clean-versus-attacked preference pairs:
 
 ```bash
@@ -757,7 +767,7 @@ Assessment generation is useful for verifier research because outputs can appear
 | Difficulty gaming | trivial or impossible questions satisfy nominal metadata | solver-based calibration and whole-exam difficulty checks |
 | Recovery exploitation | retries mutate unrelated accepted content or replay expensive calls | immutable versions, target resolution, checkpoint and replacement history |
 
-The repository now includes benchmark contracts, six controlled attack generators, deterministic baselines, a resumable LLM evaluation runner, offline metrics, and RLVR episode/preference exporters. It does **not** yet include an expert-validated adversarial corpus, a multi-seed real-model result table, or a measured reduction in reward-hacking attack success rate.
+The repository now includes benchmark contracts, six controlled attack generators, deterministic baselines, a resumable LLM evaluation runner, a three-trial Gemini Flash pilot, offline metrics, and RLVR episode/preference exporters. It does **not** yet include an expert-validated adversarial corpus, matched multi-model/multi-seed experiments on held-out adaptive attacks, or a measured reduction in reward-hacking attack success rate.
 
 ## RLVR and Reward-Hacking Evaluation Roadmap
 
