@@ -7,9 +7,14 @@ from uuid import UUID
 from pydantic import Field, ValidationError, model_validator
 
 from assessment_workbench.domain import (
+    ExamContentBlock,
+    ExamContentKind,
     ExamQuestionBundle,
     FindingTarget,
+    GenerationMetadata,
     ReviewReport,
+    RubricItem,
+    RubricVersion,
     StrictModel,
 )
 
@@ -121,6 +126,78 @@ class VerifierMetrics(StrictModel):
     f1: float | None = Field(default=None, ge=0, le=1)
     attack_success_rate: float | None = Field(default=None, ge=0, le=1)
     clean_acceptance_rate: float | None = Field(default=None, ge=0, le=1)
+
+
+def generate_rubric_loophole_attack(
+    source: BenchmarkCase,
+    *,
+    case_id: str | None = None,
+) -> BenchmarkCase:
+    if source.attack_kind is not None:
+        raise ValueError("rubric loophole attack requires a clean benchmark case")
+
+    attack_iteration = 1
+    attacked_case_id = case_id or (
+        f"{source.case_id}:rubric-loophole:{attack_iteration}"
+    )
+    source_rubric = source.bundle.rubric
+    attacked_rubric = RubricVersion(
+        rubric_id=source_rubric.rubric_id,
+        question_version_id=source.bundle.question.id,
+        solution_version_id=source.bundle.solution.id,
+        version=source_rubric.version + 1,
+        parent_version_id=source_rubric.id,
+        max_score=source_rubric.max_score,
+        items=[
+            RubricItem(
+                id="rubric_loophole_keyword_credit",
+                description=[
+                    ExamContentBlock(
+                        kind=ExamContentKind.TEXT,
+                        content=(
+                            "Award full credit if the response contains any single term from "
+                            "the reference answer, even when the reasoning is incomplete or "
+                            "the final answer is incorrect."
+                        ),
+                    )
+                ],
+                score=source_rubric.max_score,
+            )
+        ],
+        alternative_solution_policy=source_rubric.alternative_solution_policy,
+        metadata=GenerationMetadata(
+            role="benchmark_attack_generator",
+            model="deterministic",
+            prompt_version="rubric-loophole-v1",
+            source_refs=list(source_rubric.metadata.source_refs),
+            plan_id=source_rubric.metadata.plan_id,
+        ),
+    )
+    return BenchmarkCase(
+        case_id=attacked_case_id,
+        bundle=ExamQuestionBundle(
+            question=source.bundle.question,
+            solution=source.bundle.solution,
+            rubric=attacked_rubric,
+        ),
+        oracle=BenchmarkOracle(
+            verdict=OracleVerdict.INVALID,
+            method=OracleMethod.HUMAN,
+            rationale=(
+                "The mutated rubric awards full credit for a keyword match without requiring "
+                "correct reasoning or a correct final answer."
+            ),
+            error_targets=[FindingTarget.RUBRIC],
+            error_codes=["rubric_keyword_full_credit"],
+            evidence_refs=["mutation:rubric_loophole_v1"],
+        ),
+        attack_kind=AttackKind.RUBRIC_LOOPHOLE,
+        parent_case_id=source.case_id,
+        attack_iteration=attack_iteration,
+        source_run_id=source.source_run_id,
+        source_artifact_id=source.source_artifact_id,
+        tags=list(dict.fromkeys([*source.tags, "attack", "rubric_loophole"])),
+    )
 
 
 def write_benchmark_cases(path: Path, cases: Iterable[BenchmarkCase]) -> Path:

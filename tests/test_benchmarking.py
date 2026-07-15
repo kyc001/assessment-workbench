@@ -14,6 +14,7 @@ from assessment_workbench.benchmarking import (
     OracleVerdict,
     VerifierObservation,
     calculate_verifier_metrics,
+    generate_rubric_loophole_attack,
     read_benchmark_cases,
     read_verifier_observations,
     write_benchmark_cases,
@@ -167,6 +168,63 @@ def test_attacked_case_requires_lineage_and_invalid_oracle() -> None:
             attack_kind=AttackKind.RUBRIC_LOOPHOLE,
             attack_iteration=1,
         )
+
+
+def test_generate_rubric_loophole_attack_versions_only_the_rubric() -> None:
+    clean = _clean_case()
+
+    attacked = generate_rubric_loophole_attack(clean)
+
+    assert attacked.bundle.question == clean.bundle.question
+    assert attacked.bundle.solution == clean.bundle.solution
+    assert attacked.bundle.rubric.id != clean.bundle.rubric.id
+    assert attacked.bundle.rubric.rubric_id == clean.bundle.rubric.rubric_id
+    assert attacked.bundle.rubric.version == clean.bundle.rubric.version + 1
+    assert attacked.bundle.rubric.parent_version_id == clean.bundle.rubric.id
+
+
+def test_generate_rubric_loophole_attack_creates_full_credit_keyword_rule() -> None:
+    attacked = generate_rubric_loophole_attack(_clean_case())
+
+    assert attacked.bundle.rubric.max_score == attacked.bundle.question.score
+    assert len(attacked.bundle.rubric.items) == 1
+    loophole = attacked.bundle.rubric.items[0]
+    assert loophole.score == attacked.bundle.rubric.max_score
+    assert "any single term" in loophole.description[0].content
+    assert "final answer is incorrect" in loophole.description[0].content
+
+
+def test_generate_rubric_loophole_attack_records_oracle_and_lineage() -> None:
+    clean = _clean_case()
+
+    attacked = generate_rubric_loophole_attack(clean, case_id="algebra-001-loophole")
+
+    assert attacked.case_id == "algebra-001-loophole"
+    assert attacked.attack_kind is AttackKind.RUBRIC_LOOPHOLE
+    assert attacked.parent_case_id == clean.case_id
+    assert attacked.attack_iteration == 1
+    assert attacked.oracle.verdict is OracleVerdict.INVALID
+    assert attacked.oracle.method is OracleMethod.HUMAN
+    assert attacked.oracle.error_targets == [FindingTarget.RUBRIC]
+    assert attacked.oracle.error_codes == ["rubric_keyword_full_credit"]
+    assert attacked.oracle.evidence_refs == ["mutation:rubric_loophole_v1"]
+    assert "rubric_loophole" in attacked.tags
+
+
+def test_generate_rubric_loophole_attack_does_not_mutate_source() -> None:
+    clean = _clean_case()
+    snapshot = clean.model_dump_json()
+
+    generate_rubric_loophole_attack(clean)
+
+    assert clean.model_dump_json() == snapshot
+
+
+def test_generate_rubric_loophole_attack_rejects_attacked_source() -> None:
+    attacked = _attack_case("attack-001", "clean-001")
+
+    with pytest.raises(ValueError, match="requires a clean benchmark case"):
+        generate_rubric_loophole_attack(attacked)
 
 
 def test_benchmark_jsonl_round_trip(tmp_path: Path) -> None:
