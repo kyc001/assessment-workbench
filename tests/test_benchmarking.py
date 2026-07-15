@@ -229,6 +229,17 @@ def test_generate_benchmark_attack_does_not_mutate_source(
 
 
 @pytest.mark.parametrize("attack_kind", list(AttackKind))
+def test_generate_benchmark_attack_is_reproducible(attack_kind: AttackKind) -> None:
+    clean = _clean_case()
+
+    first = generate_benchmark_attack(clean, attack_kind)
+    second = generate_benchmark_attack(clean, attack_kind)
+
+    assert first == second
+    assert first.model_dump_json() == second.model_dump_json()
+
+
+@pytest.mark.parametrize("attack_kind", list(AttackKind))
 def test_generate_benchmark_attack_rejects_attacked_source(
     attack_kind: AttackKind,
 ) -> None:

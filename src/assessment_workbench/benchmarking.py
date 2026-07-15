@@ -3,7 +3,7 @@ from copy import deepcopy
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import Field, ValidationError, model_validator
 
@@ -697,6 +697,7 @@ def _version_question(
     prompt_version: str,
 ) -> QuestionVersion:
     return QuestionVersion(
+        id=_derived_version_id(source.id, prompt_version, "question"),
         question_id=source.question_id,
         version=source.version + 1,
         parent_version_id=source.id,
@@ -724,6 +725,7 @@ def _version_solution(
     verification_notes: list[str] | None = None,
 ) -> SolutionVersion:
     return SolutionVersion(
+        id=_derived_version_id(source.id, prompt_version, "solution"),
         solution_id=source.solution_id,
         question_version_id=question_version_id,
         version=source.version + 1,
@@ -751,6 +753,7 @@ def _version_rubric(
     items: list[RubricItem] | None = None,
 ) -> RubricVersion:
     return RubricVersion(
+        id=_derived_version_id(source.id, prompt_version, "rubric"),
         rubric_id=source.rubric_id,
         question_version_id=question_version_id,
         solution_version_id=solution_version_id,
@@ -760,6 +763,13 @@ def _version_rubric(
         items=deepcopy(items if items is not None else source.items),
         alternative_solution_policy=source.alternative_solution_policy,
         metadata=_attack_metadata(source.metadata, prompt_version=prompt_version),
+    )
+
+
+def _derived_version_id(parent_id: UUID, mutation_version: str, component: str) -> UUID:
+    return uuid5(
+        NAMESPACE_URL,
+        f"assessment-workbench:{parent_id}:{mutation_version}:{component}",
     )
 
 
