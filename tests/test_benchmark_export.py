@@ -14,6 +14,7 @@ from assessment_workbench.benchmark_export import (
 )
 from assessment_workbench.benchmarking import (
     DeterministicBaseline,
+    calculate_benchmark_experiment_report,
     generate_deterministic_baseline_observations,
     read_benchmark_cases,
     write_verifier_observations,
@@ -155,3 +156,43 @@ def test_benchmark_export_cli_writes_episodes_and_preferences(tmp_path: Path) ->
         preferences_path.read_text(encoding="utf-8").splitlines()[0]
     )
     assert first_preference["schema_version"] == "rlvr-preference-v1"
+
+
+def test_committed_baseline_artifacts_replay_exactly() -> None:
+    fixture_root = Path(__file__).parents[1] / "examples" / "verifier-benchmark"
+    cases = read_benchmark_cases(fixture_root / "cases.jsonl")
+    observations = generate_deterministic_baseline_observations(cases)
+    episodes = build_rlvr_episodes(cases, observations)
+    preferences = build_rlvr_preferences(cases, observations)
+    report = calculate_benchmark_experiment_report(
+        cases,
+        observations,
+        verifiers=[baseline.value for baseline in DeterministicBaseline],
+    )
+
+    committed_observations = [
+        json.loads(line)
+        for line in (fixture_root / "observations.baseline.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    committed_episodes = [
+        json.loads(line)
+        for line in (fixture_root / "episodes.baseline.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    committed_preferences = [
+        json.loads(line)
+        for line in (fixture_root / "preferences.baseline.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    committed_report = json.loads(
+        (fixture_root / "report.baseline.json").read_text(encoding="utf-8")
+    )
+
+    assert [item.model_dump(mode="json") for item in observations] == committed_observations
+    assert [item.model_dump(mode="json") for item in episodes] == committed_episodes
+    assert [item.model_dump(mode="json") for item in preferences] == committed_preferences
+    assert report.model_dump(mode="json") == committed_report
