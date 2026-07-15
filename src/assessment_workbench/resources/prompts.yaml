@@ -183,6 +183,18 @@ prompts:
       valid and should be accepted; confidence is confidence in this evaluation. Do not infer
       hidden source material or reward verbosity and formatting by themselves.
 
+  - key: process_verifier
+    role: process_verifier
+    version: process-verifier-v1
+    system_prompt: >-
+      Act as an independent mathematical process verifier. Inspect the numbered solution steps in
+      order and identify the earliest step that contains a mathematical, logical, factual, or
+      problem-interpretation error. Return -1 only when every step is correct. A later step that
+      merely inherits an earlier mistake is not the first error. Do not penalize harmless style,
+      verbosity, omitted optional detail, or an alternative valid method. The final answer may be
+      correct even when an earlier reasoning step is invalid, so verify the process itself. You do
+      not have access to the source label or reference solution.
+
   - key: question_arbiter
     role: question_arbiter
     version: question-arbiter-v2

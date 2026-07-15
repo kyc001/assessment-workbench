@@ -70,6 +70,17 @@ from assessment_workbench.models import OpenAICompatibleModel
 from assessment_workbench.parsers import FixtureParser, MinerUApiParser, MinerUCliParser
 from assessment_workbench.planning import QuestionSpecWorkflow
 from assessment_workbench.ports import DocumentParser
+from assessment_workbench.process_benchmark import (
+    ProcessSamplingStrategy,
+    ProcessVerifierObservation,
+    calculate_process_benchmark_report,
+    import_processbench_cases,
+    read_process_cases,
+    read_process_observations,
+    run_process_verifier,
+    write_process_cases,
+    write_process_observations,
+)
 from assessment_workbench.profiles import load_exam_blueprint, load_subject_profile
 from assessment_workbench.prompting import load_default_prompt_registry
 from assessment_workbench.storage import (
@@ -322,6 +333,152 @@ def generate_llm_verifier_observations(
             typer.echo(_console_safe(f"{case_id}: {error}", err=True), err=True)
         raise typer.Exit(1)
     typer.echo(output)
+
+
+@benchmark_app.command("import-processbench")
+def import_processbench(
+    source: Annotated[
+        Path,
+        typer.Option(exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    split: Annotated[str, typer.Option(help="ProcessBench source split, such as gsm8k")],
+    output: Annotated[Path, typer.Option(help="Process benchmark JSONL output path")],
+    limit: Annotated[int | None, typer.Option(min=1)] = None,
+    sampling: Annotated[
+        ProcessSamplingStrategy,
+        typer.Option(help="Limited-import sampling strategy"),
+    ] = ProcessSamplingStrategy.HEAD,
+) -> None:
+    try:
+        cases = import_processbench_cases(
+            source,
+            split=split,
+            limit=limit,
+            sampling=sampling,
+        )
+        write_process_cases(output, cases)
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(output)
+
+
+@benchmark_app.command("observe-process")
+def generate_process_verifier_observations(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option(help="Resume-safe process verifier observation JSONL path"),
+    ],
+    verifier: Annotated[str, typer.Option(help="Stable process verifier arm identifier")],
+    model_name: Annotated[
+        str | None,
+        typer.Option("--model", help="Model override; defaults to AW_LLM_MODEL"),
+    ] = None,
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+    concurrency: Annotated[
+        int | None,
+        typer.Option(min=1, help="Concurrent case evaluations"),
+    ] = None,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    settings = Settings()
+    resolved_model = model_name or settings.llm_model
+    resolved_concurrency = concurrency or settings.llm_request_concurrency
+    try:
+        cases = read_process_cases(cases_path)
+        case_ids = {case.case_id for case in cases}
+        observations = read_process_observations(output) if output.exists() else []
+        completed_case_ids: set[str] = set()
+        for observation in observations:
+            if observation.case_id not in case_ids:
+                raise ValueError(
+                    f"existing process observation references unknown case: {observation.case_id}"
+                )
+            if observation.verifier == verifier and observation.trial == trial:
+                completed_case_ids.add(observation.case_id)
+
+        workspace = _workspace(workspace_path)
+        model = OpenAICompatibleModel(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=resolved_model,
+            audit_store=LocalKnowledgeBackend(workspace),
+            timeout=settings.http_timeout,
+            max_concurrency=resolved_concurrency,
+            schema_in_prompt=settings.llm_schema_in_prompt,
+        )
+        prompt = load_default_prompt_registry().require("process_verifier")
+        case_order = {case.case_id: index for index, case in enumerate(cases)}
+
+        def persist(observation: ProcessVerifierObservation) -> None:
+            observations.append(observation)
+            observations.sort(
+                key=lambda item: (
+                    item.verifier,
+                    item.trial,
+                    case_order[item.case_id],
+                )
+            )
+            write_process_observations(output, observations)
+
+        result = asyncio.run(
+            run_process_verifier(
+                cases,
+                model,
+                prompt=prompt,
+                verifier=verifier,
+                model_name=resolved_model,
+                trial=trial,
+                concurrency=resolved_concurrency,
+                completed_case_ids=completed_case_ids,
+                on_observation=persist,
+            )
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    if result.failures:
+        for case_id, error in sorted(result.failures.items()):
+            typer.echo(_console_safe(f"{case_id}: {error}", err=True), err=True)
+        raise typer.Exit(1)
+    typer.echo(output)
+
+
+@benchmark_app.command("report-process")
+def report_process_benchmark(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    observations_path: Annotated[
+        Path,
+        typer.Option(
+            "--observations",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    verifier: Annotated[str, typer.Option(help="Verifier arm to report")],
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+    output: Annotated[Path | None, typer.Option(help="Optional JSON report path")] = None,
+) -> None:
+    try:
+        report = calculate_process_benchmark_report(
+            read_process_cases(cases_path),
+            read_process_observations(observations_path),
+            verifier=verifier,
+            trial=trial,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    _emit_json(report.model_dump_json(indent=2), output)
 
 
 @benchmark_app.command("export-episodes")
