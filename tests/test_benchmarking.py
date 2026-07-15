@@ -137,4 +137,3 @@ def test_benchmark_jsonl_rejects_duplicate_case_ids(tmp_path: Path) -> None:
     duplicate = _clean_case()
     with pytest.raises(ValueError, match="case ids must be unique"):
         write_benchmark_cases(tmp_path / "benchmark.jsonl", [duplicate, duplicate])
-
