@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
@@ -28,6 +29,7 @@ class OpenAICompatibleModel:
         audit_store: ModelAuditStore,
         timeout: float = 300,
         max_concurrency: int = 6,
+        schema_in_prompt: bool = False,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
@@ -36,6 +38,7 @@ class OpenAICompatibleModel:
         self.model = model
         self.audit_store = audit_store
         self.timeout = timeout
+        self.schema_in_prompt = schema_in_prompt
         self._request_semaphore = asyncio.Semaphore(max_concurrency)
 
     async def complete(
@@ -51,10 +54,19 @@ class OpenAICompatibleModel:
     ) -> ResponseT:
         if not self.api_key:
             raise RuntimeError("AW_LLM_API_KEY is required for LLM knowledge extraction")
+        response_schema = _strict_schema(response_model.model_json_schema())
+        schema_json = json.dumps(response_schema, ensure_ascii=False, separators=(",", ":"))
+        request_system_prompt = system_prompt
+        if self.schema_in_prompt:
+            request_system_prompt = (
+                f"{system_prompt}\n\n"
+                "Return one JSON object only that matches this response schema exactly. "
+                f"Response JSON Schema: {schema_json}"
+            )
         request = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": request_system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "response_format": {
@@ -62,7 +74,7 @@ class OpenAICompatibleModel:
                 "json_schema": {
                     "name": response_model.__name__,
                     "strict": True,
-                    "schema": _strict_schema(response_model.model_json_schema()),
+                    "schema": response_schema,
                 },
             },
             "stream": True,
@@ -98,7 +110,9 @@ class OpenAICompatibleModel:
                         "content": (
                             "The previous JSON failed schema validation. Return a corrected JSON "
                             "object only, preserving valid content. Validation errors: "
-                            f"{json.dumps(exc.errors(include_url=False), default=str)}"
+                            f"{json.dumps(exc.errors(include_url=False), default=str)}. "
+                            "Expected JSON Schema: "
+                            f"{schema_json}"
                         ),
                     },
                 ]
@@ -129,7 +143,10 @@ class OpenAICompatibleModel:
     async def _post(self, request: dict[str, Any]) -> dict[str, Any]:
         async with (
             self._request_semaphore,
-            httpx.AsyncClient(timeout=self.timeout) as client,
+            httpx.AsyncClient(
+                timeout=self.timeout,
+                trust_env=not _is_loopback_endpoint(self.base_url),
+            ) as client,
         ):
             try:
                 async with asyncio.timeout(self.timeout):
@@ -155,6 +172,11 @@ class OpenAICompatibleModel:
                                 raise RetryableWorkflowError(str(exc)) from exc
                         except httpx.HTTPStatusError as exc:
                             if not is_retryable_http_status(exc.response.status_code):
+                                raise
+                            if attempt == 2:
+                                raise RetryableWorkflowError(str(exc)) from exc
+                        except ValueError as exc:
+                            if str(exc) != "model stream completed without response content":
                                 raise
                             if attempt == 2:
                                 raise RetryableWorkflowError(str(exc)) from exc
@@ -246,3 +268,15 @@ def _endpoint_origin(base_url: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         return base_url
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _is_loopback_endpoint(base_url: str) -> bool:
+    hostname = urlsplit(base_url).hostname
+    if hostname is None:
+        return False
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False

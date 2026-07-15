@@ -42,6 +42,7 @@ def build_exam_workflow(
         audit_store=audit_store,
         timeout=settings.http_timeout,
         max_concurrency=settings.llm_request_concurrency,
+        schema_in_prompt=settings.llm_schema_in_prompt,
     )
     strong = standard
     if settings.llm_strong_model != settings.llm_model:
@@ -52,6 +53,7 @@ def build_exam_workflow(
             audit_store=audit_store,
             timeout=settings.http_timeout,
             max_concurrency=settings.llm_request_concurrency,
+            schema_in_prompt=settings.llm_schema_in_prompt,
         )
     compiler = None
     inspector = None

@@ -191,6 +191,7 @@ def ingest_material(
             model=settings.llm_model,
             audit_store=knowledge,
             timeout=settings.http_timeout,
+            schema_in_prompt=settings.llm_schema_in_prompt,
         )
     workflow = MaterialIngestionWorkflow(
         document_parser,

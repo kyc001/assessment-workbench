@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-5.6-luna"
     llm_strong_model: str = "gpt-5.6-terra"
+    llm_schema_in_prompt: bool = False
     llm_request_concurrency: int = 6
     exam_question_concurrency: int = 18
     exam_reviewer_attempts: int = 3

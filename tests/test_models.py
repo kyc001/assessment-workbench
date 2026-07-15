@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import httpx
@@ -8,7 +9,11 @@ from pydantic import BaseModel
 from assessment_workbench.domain import ContextPack, ModelCall
 from assessment_workbench.errors import RetryableWorkflowError
 from assessment_workbench.model_contracts import canonical_json_sha256, strict_json_schema
-from assessment_workbench.models import OpenAICompatibleModel, _strict_schema
+from assessment_workbench.models import (
+    OpenAICompatibleModel,
+    _is_loopback_endpoint,
+    _strict_schema,
+)
 from assessment_workbench.prompting import PromptBundle, complete_with_prompt, json_prompt
 from assessment_workbench.storage import (
     ArtifactStore,
@@ -64,6 +69,45 @@ async def test_openai_compatible_structured_response(tmp_path: Path) -> None:
     assert call.provider_request_id == "response-1"
     assert call.finish_reason == "stop"
     assert call.endpoint_origin == "https://model.test"
+
+
+@respx.mock
+async def test_schema_can_be_embedded_for_compatibility_proxy(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    route = respx.post("https://model.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "response-schema-prompt",
+                "choices": [
+                    {"message": {"content": '{"value":"ok"}'}, "finish_reason": "stop"}
+                ],
+                "usage": {},
+            },
+        )
+    )
+    model = OpenAICompatibleModel(
+        base_url="https://model.test/v1",
+        api_key="secret",
+        model="test-model",
+        audit_store=LocalKnowledgeBackend(workspace),
+        schema_in_prompt=True,
+    )
+
+    result = await model.complete(
+        role="test",
+        system_prompt="system",
+        user_prompt="user",
+        response_model=Answer,
+        prompt_version="v1",
+    )
+
+    assert result.value == "ok"
+    request = json.loads(route.calls[0].request.content)
+    system_prompt = request["messages"][0]["content"]
+    assert "Response JSON Schema" in system_prompt
+    assert '"value"' in system_prompt
 
 
 @respx.mock
@@ -154,7 +198,7 @@ async def test_model_repair_is_a_single_audited_call(tmp_path: Path) -> None:
             },
         ),
     ]
-    respx.post("https://model.test/v1/chat/completions").mock(side_effect=responses)
+    route = respx.post("https://model.test/v1/chat/completions").mock(side_effect=responses)
     model = OpenAICompatibleModel(
         base_url="https://model.test/v1",
         api_key="secret",
@@ -176,6 +220,59 @@ async def test_model_repair_is_a_single_audited_call(tmp_path: Path) -> None:
     assert len(call.request_sha256_sequence) == 2
     assert call.request_sha256_sequence[0] == call.request_sha256
     assert call.provider_request_id == "repaired-response"
+    repair_request = json.loads(route.calls[1].request.content)
+    repair_prompt = repair_request["messages"][-1]["content"]
+    assert "Expected JSON Schema" in repair_prompt
+    assert '"value"' in repair_prompt
+
+
+@respx.mock
+async def test_empty_stream_retries_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.initialize()
+    route = respx.post("https://model.test/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text="data: [DONE]\n\n",
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "id": "response-after-empty-stream",
+                    "choices": [
+                        {"message": {"content": '{"value":"ok"}'}, "finish_reason": "stop"}
+                    ],
+                    "usage": {},
+                },
+            ),
+        ]
+    )
+    model = OpenAICompatibleModel(
+        base_url="https://model.test/v1",
+        api_key="secret",
+        model="test-model",
+        audit_store=LocalKnowledgeBackend(workspace),
+    )
+
+    async def skip_backoff(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("assessment_workbench.models.asyncio.sleep", skip_backoff)
+
+    result = await model.complete(
+        role="test",
+        system_prompt="system",
+        user_prompt="user",
+        response_model=Answer,
+        prompt_version="v1",
+    )
+
+    assert result.value == "ok"
+    assert route.call_count == 2
 
 
 @respx.mock
@@ -257,6 +354,19 @@ def test_strict_schema_requires_defaulted_properties_recursively() -> None:
     assert schema["additionalProperties"] is False
     assert schema["properties"]["nested"]["required"] == ["items"]
     assert schema["properties"]["nested"]["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://127.0.0.1:8081/v1", True),
+        ("http://localhost:8081/v1", True),
+        ("http://[::1]:8081/v1", True),
+        ("https://model.test/v1", False),
+    ],
+)
+def test_loopback_endpoint_detection(base_url: str, expected: bool) -> None:
+    assert _is_loopback_endpoint(base_url) is expected
 
 
 def _stored_model_call(workspace: Workspace) -> ModelCall:
