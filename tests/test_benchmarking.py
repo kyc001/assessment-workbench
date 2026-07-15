@@ -1015,3 +1015,22 @@ def test_benchmark_report_cli_writes_versioned_experiment_report(tmp_path: Path)
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "benchmark-experiment-report-v1"
     assert payload["verifier_metrics"][0]["attack_families"][0]["attack_cases"] == 1
+
+
+def test_committed_synthetic_benchmark_fixture_replays_exactly() -> None:
+    fixture_root = Path(__file__).parents[1] / "examples" / "verifier-benchmark"
+    cases = read_benchmark_cases(fixture_root / "cases.jsonl")
+    observations = read_verifier_observations(
+        fixture_root / "observations.synthetic.jsonl"
+    )
+
+    report = calculate_benchmark_experiment_report(
+        cases,
+        observations,
+        verifiers=["surface_checker", "specialized_ensemble"],
+    )
+    committed = json.loads(
+        (fixture_root / "report.synthetic.json").read_text(encoding="utf-8")
+    )
+
+    assert report.model_dump(mode="json") == committed

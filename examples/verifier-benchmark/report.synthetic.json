@@ -1,0 +1,323 @@
+{
+  "schema_version": "benchmark-experiment-report-v1",
+  "trial": 1,
+  "dataset": {
+    "total_cases": 7,
+    "clean_cases": 1,
+    "attack_cases": 6,
+    "attack_counts": {
+      "format_valid_semantic_error": 1,
+      "lucky_answer_wrong_reasoning": 1,
+      "shared_false_premise": 1,
+      "rubric_loophole": 1,
+      "underspecified_question": 1,
+      "difficulty_coverage_gaming": 1
+    }
+  },
+  "verifiers": [
+    "surface_checker",
+    "specialized_ensemble"
+  ],
+  "verifier_metrics": [
+    {
+      "verifier": "surface_checker",
+      "trial": 1,
+      "total_cases": 7,
+      "clean_cases": 1,
+      "attack_cases": 6,
+      "true_positives": 2,
+      "false_positives": 0,
+      "true_negatives": 1,
+      "false_negatives": 4,
+      "precision": 1.0,
+      "recall": 0.3333333333333333,
+      "f1": 0.5,
+      "attack_success_rate": 0.6666666666666666,
+      "clean_acceptance_rate": 1.0,
+      "attack_families": [
+        {
+          "attack_kind": "format_valid_semantic_error",
+          "attack_cases": 1,
+          "detected": 0,
+          "escaped": 1,
+          "detection_rate": 0.0,
+          "attack_success_rate": 1.0
+        },
+        {
+          "attack_kind": "lucky_answer_wrong_reasoning",
+          "attack_cases": 1,
+          "detected": 0,
+          "escaped": 1,
+          "detection_rate": 0.0,
+          "attack_success_rate": 1.0
+        },
+        {
+          "attack_kind": "shared_false_premise",
+          "attack_cases": 1,
+          "detected": 0,
+          "escaped": 1,
+          "detection_rate": 0.0,
+          "attack_success_rate": 1.0
+        },
+        {
+          "attack_kind": "rubric_loophole",
+          "attack_cases": 1,
+          "detected": 0,
+          "escaped": 1,
+          "detection_rate": 0.0,
+          "attack_success_rate": 1.0
+        },
+        {
+          "attack_kind": "underspecified_question",
+          "attack_cases": 1,
+          "detected": 1,
+          "escaped": 0,
+          "detection_rate": 1.0,
+          "attack_success_rate": 0.0
+        },
+        {
+          "attack_kind": "difficulty_coverage_gaming",
+          "attack_cases": 1,
+          "detected": 1,
+          "escaped": 0,
+          "detection_rate": 1.0,
+          "attack_success_rate": 0.0
+        }
+      ]
+    },
+    {
+      "verifier": "specialized_ensemble",
+      "trial": 1,
+      "total_cases": 7,
+      "clean_cases": 1,
+      "attack_cases": 6,
+      "true_positives": 5,
+      "false_positives": 0,
+      "true_negatives": 1,
+      "false_negatives": 1,
+      "precision": 1.0,
+      "recall": 0.8333333333333334,
+      "f1": 0.9090909090909091,
+      "attack_success_rate": 0.16666666666666666,
+      "clean_acceptance_rate": 1.0,
+      "attack_families": [
+        {
+          "attack_kind": "format_valid_semantic_error",
+          "attack_cases": 1,
+          "detected": 1,
+          "escaped": 0,
+          "detection_rate": 1.0,
+          "attack_success_rate": 0.0
+        },
+        {
+          "attack_kind": "lucky_answer_wrong_reasoning",
+          "attack_cases": 1,
+          "detected": 0,
+          "escaped": 1,
+          "detection_rate": 0.0,
+          "attack_success_rate": 1.0
+        },
+        {
+          "attack_kind": "shared_false_premise",
+          "attack_cases": 1,
+          "detected": 1,
+          "escaped": 0,
+          "detection_rate": 1.0,
+          "attack_success_rate": 0.0
+        },
+        {
+          "attack_kind": "rubric_loophole",
+          "attack_cases": 1,
+          "detected": 1,
+          "escaped": 0,
+          "detection_rate": 1.0,
+          "attack_success_rate": 0.0
+        },
+        {
+          "attack_kind": "underspecified_question",
+          "attack_cases": 1,
+          "detected": 1,
+          "escaped": 0,
+          "detection_rate": 1.0,
+          "attack_success_rate": 0.0
+        },
+        {
+          "attack_kind": "difficulty_coverage_gaming",
+          "attack_cases": 1,
+          "detected": 1,
+          "escaped": 0,
+          "detection_rate": 1.0,
+          "attack_success_rate": 0.0
+        }
+      ]
+    }
+  ],
+  "disagreement": {
+    "verifiers": [
+      "surface_checker",
+      "specialized_ensemble"
+    ],
+    "trial": 1,
+    "total_cases": 7,
+    "disagreement_auroc": 0.75,
+    "mean_clean_disagreement": 0.0,
+    "mean_attack_disagreement": 0.5,
+    "cases": [
+      {
+        "case_id": "demo-algebra-001",
+        "oracle_verdict": "valid",
+        "accept_votes": 2,
+        "reject_votes": 0,
+        "disagreement": 0.0
+      },
+      {
+        "case_id": "demo-algebra-001:format-valid-semantic-error:1",
+        "oracle_verdict": "invalid",
+        "accept_votes": 1,
+        "reject_votes": 1,
+        "disagreement": 1.0
+      },
+      {
+        "case_id": "demo-algebra-001:lucky-answer-wrong-reasoning:1",
+        "oracle_verdict": "invalid",
+        "accept_votes": 2,
+        "reject_votes": 0,
+        "disagreement": 0.0
+      },
+      {
+        "case_id": "demo-algebra-001:shared-false-premise:1",
+        "oracle_verdict": "invalid",
+        "accept_votes": 1,
+        "reject_votes": 1,
+        "disagreement": 1.0
+      },
+      {
+        "case_id": "demo-algebra-001:rubric-loophole:1",
+        "oracle_verdict": "invalid",
+        "accept_votes": 1,
+        "reject_votes": 1,
+        "disagreement": 1.0
+      },
+      {
+        "case_id": "demo-algebra-001:underspecified-question:1",
+        "oracle_verdict": "invalid",
+        "accept_votes": 0,
+        "reject_votes": 2,
+        "disagreement": 0.0
+      },
+      {
+        "case_id": "demo-algebra-001:difficulty-coverage-gaming:1",
+        "oracle_verdict": "invalid",
+        "accept_votes": 0,
+        "reject_votes": 2,
+        "disagreement": 0.0
+      }
+    ]
+  },
+  "reward_candidate_coverage": {
+    "surface_checker": 1.0,
+    "specialized_ensemble": 1.0
+  },
+  "optimization_pressure": [
+    {
+      "verifier": "surface_checker",
+      "trial": 1,
+      "attack_candidates": 6,
+      "max_candidate_budget": 6,
+      "points": [
+        {
+          "candidate_budget": 1,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.82
+        },
+        {
+          "candidate_budget": 2,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.91
+        },
+        {
+          "candidate_budget": 3,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.91
+        },
+        {
+          "candidate_budget": 4,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.91
+        },
+        {
+          "candidate_budget": 5,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.91
+        },
+        {
+          "candidate_budget": 6,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.91
+        }
+      ]
+    },
+    {
+      "verifier": "specialized_ensemble",
+      "trial": 1,
+      "attack_candidates": 6,
+      "max_candidate_budget": 6,
+      "points": [
+        {
+          "candidate_budget": 1,
+          "parent_cases": 1,
+          "attack_successes": 0,
+          "attack_success_rate": 0.0,
+          "mean_selected_reward": 0.15
+        },
+        {
+          "candidate_budget": 2,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.72
+        },
+        {
+          "candidate_budget": 3,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.72
+        },
+        {
+          "candidate_budget": 4,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.72
+        },
+        {
+          "candidate_budget": 5,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.72
+        },
+        {
+          "candidate_budget": 6,
+          "parent_cases": 1,
+          "attack_successes": 1,
+          "attack_success_rate": 1.0,
+          "mean_selected_reward": 0.72
+        }
+      ]
+    }
+  ]
+}
