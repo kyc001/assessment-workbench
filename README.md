@@ -2,7 +2,7 @@
 
 > 面向测评生成的 Verifier-Centric 多智能体评测、结构化 Reward Candidate 与可重放轨迹基础设施。
 
-[English](README.md)
+[English](README.en.md)
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)

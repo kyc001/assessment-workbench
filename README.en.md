@@ -2,7 +2,7 @@
 
 > Verifier-centric multi-agent evaluation, structured reward candidates, and replayable trajectories for assessment generation.
 
-[中文文档](README.zh-CN.md)
+[中文](README.md)
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
