@@ -13,6 +13,7 @@ from assessment_workbench.benchmarking import (
     OracleMethod,
     OracleVerdict,
     VerifierObservation,
+    calculate_verifier_disagreement,
     calculate_verifier_metrics,
     generate_rubric_loophole_attack,
     read_benchmark_cases,
@@ -322,6 +323,98 @@ def test_verifier_metrics_require_one_observation_per_case() -> None:
             [first, second],
             [_observation(first, observation_id="obs-001", passed=True)],
             verifier="specialized_ensemble",
+        )
+
+
+def test_verifier_disagreement_auroc_tracks_oracle_errors() -> None:
+    clean = _clean_case("clean-disagreement")
+    attack = _attack_case("attack-disagreement", clean.case_id)
+    observations = [
+        _observation(
+            clean,
+            observation_id="obs-clean-a",
+            passed=True,
+            verifier="verifier_a",
+        ),
+        _observation(
+            clean,
+            observation_id="obs-clean-b",
+            passed=True,
+            verifier="verifier_b",
+        ),
+        _observation(
+            attack,
+            observation_id="obs-attack-a",
+            passed=True,
+            verifier="verifier_a",
+        ),
+        _observation(
+            attack,
+            observation_id="obs-attack-b",
+            passed=False,
+            verifier="verifier_b",
+        ),
+    ]
+
+    metrics = calculate_verifier_disagreement(
+        [clean, attack],
+        observations,
+        verifiers=["verifier_a", "verifier_b"],
+    )
+
+    assert metrics.disagreement_auroc == 1.0
+    assert metrics.mean_clean_disagreement == 0.0
+    assert metrics.mean_attack_disagreement == 1.0
+    assert metrics.cases[0].accept_votes == 2
+    assert metrics.cases[1].accept_votes == 1
+    assert metrics.cases[1].reject_votes == 1
+
+
+def test_verifier_disagreement_auroc_gives_half_credit_to_ties() -> None:
+    clean = _clean_case("clean-tie")
+    attack = _attack_case("attack-tie", clean.case_id)
+    observations = [
+        _observation(clean, observation_id="clean-a", passed=True, verifier="a"),
+        _observation(clean, observation_id="clean-b", passed=True, verifier="b"),
+        _observation(attack, observation_id="attack-a", passed=False, verifier="a"),
+        _observation(attack, observation_id="attack-b", passed=False, verifier="b"),
+    ]
+
+    metrics = calculate_verifier_disagreement(
+        [clean, attack],
+        observations,
+        verifiers=["a", "b"],
+    )
+
+    assert metrics.disagreement_auroc == 0.5
+
+
+def test_verifier_disagreement_requires_complete_observation_matrix() -> None:
+    case = _clean_case("clean-missing-vote")
+
+    with pytest.raises(ValueError, match="missing verifier observations"):
+        calculate_verifier_disagreement(
+            [case],
+            [_observation(case, observation_id="obs-a", passed=True, verifier="a")],
+            verifiers=["a", "b"],
+        )
+
+
+def test_verifier_disagreement_rejects_version_mismatch() -> None:
+    case = _clean_case("clean-version-mismatch")
+    first = _observation(case, observation_id="obs-a", passed=True, verifier="a")
+    second = _observation(
+        case,
+        observation_id="obs-b",
+        passed=False,
+        verifier="b",
+    ).model_copy(update={"rubric_version_id": uuid4()})
+
+    with pytest.raises(ValueError, match="version mismatch"):
+        calculate_verifier_disagreement(
+            [case],
+            [first, second],
+            verifiers=["a", "b"],
         )
 
 
