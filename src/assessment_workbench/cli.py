@@ -16,8 +16,10 @@ from assessment_workbench.application import (
 )
 from assessment_workbench.benchmarking import (
     calculate_verifier_metrics,
+    generate_rubric_loophole_attack,
     read_benchmark_cases,
     read_verifier_observations,
+    write_benchmark_cases,
 )
 from assessment_workbench.config import Settings
 from assessment_workbench.document_workflow import latest_document_builds
@@ -89,6 +91,27 @@ def _console_safe(value: object, *, err: bool = False) -> str:
     stream = sys.stderr if err else sys.stdout
     encoding = getattr(stream, "encoding", None) or "utf-8"
     return text.encode(encoding, errors="replace").decode(encoding)
+
+
+@benchmark_app.command("attack-rubric")
+def generate_rubric_loophole_benchmark(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Paired clean and attacked benchmark JSONL path"),
+    ],
+) -> None:
+    try:
+        clean_cases = read_benchmark_cases(cases_path)
+        attacked_cases = [generate_rubric_loophole_attack(case) for case in clean_cases]
+        write_benchmark_cases(output, [*clean_cases, *attacked_cases])
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(output)
 
 
 @benchmark_app.command("evaluate")

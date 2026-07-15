@@ -356,3 +356,47 @@ def test_benchmark_evaluate_cli_outputs_json_metrics(tmp_path: Path) -> None:
     assert payload["precision"] == 1.0
     assert payload["recall"] == 1.0
     assert payload["attack_success_rate"] == 0.0
+
+
+def test_benchmark_attack_rubric_cli_writes_paired_cases(tmp_path: Path) -> None:
+    clean = _clean_case("clean-cli-attack")
+    cases_path = write_benchmark_cases(tmp_path / "clean.jsonl", [clean])
+    output_path = tmp_path / "paired.jsonl"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "attack-rubric",
+            "--cases",
+            str(cases_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    paired = read_benchmark_cases(output_path)
+    assert paired[0] == clean
+    assert paired[1].parent_case_id == clean.case_id
+    assert paired[1].attack_kind is AttackKind.RUBRIC_LOOPHOLE
+
+
+def test_benchmark_attack_rubric_cli_rejects_attacked_input(tmp_path: Path) -> None:
+    attacked = _attack_case("attack-cli-input", "clean-cli-input")
+    cases_path = write_benchmark_cases(tmp_path / "attacked.jsonl", [attacked])
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "attack-rubric",
+            "--cases",
+            str(cases_path),
+            "--output",
+            str(tmp_path / "paired.jsonl"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "requires a clean benchmark case" in result.output
