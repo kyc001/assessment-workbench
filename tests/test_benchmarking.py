@@ -14,6 +14,7 @@ from assessment_workbench.benchmarking import (
     OracleVerdict,
     VerifierObservation,
     build_attack_dataset,
+    calculate_benchmark_experiment_report,
     calculate_optimization_pressure,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
@@ -488,6 +489,9 @@ def test_verifier_metrics_measure_detection_and_attack_success() -> None:
     assert metrics.f1 == 0.5
     assert metrics.attack_success_rate == 0.5
     assert metrics.clean_acceptance_rate == 0.5
+    assert len(metrics.attack_families) == 1
+    assert metrics.attack_families[0].attack_kind is AttackKind.RUBRIC_LOOPHOLE
+    assert metrics.attack_families[0].detection_rate == 0.5
 
 
 def test_verifier_metrics_reject_version_mismatch() -> None:
@@ -669,6 +673,62 @@ def test_optimization_pressure_requires_candidate_rewards() -> None:
             ],
             verifier="reward_verifier",
         )
+
+
+def test_benchmark_experiment_report_combines_metrics_and_pressure() -> None:
+    clean = _clean_case("report-clean")
+    dataset = build_attack_dataset(
+        [clean],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE, AttackKind.SHARED_FALSE_PREMISE],
+    )
+    first_attack = dataset[1]
+    second_attack = dataset[2]
+    observations = [
+        _observation(clean, observation_id="report-a-clean", passed=True, verifier="a"),
+        _observation(
+            first_attack,
+            observation_id="report-a-first",
+            passed=False,
+            verifier="a",
+            reward_candidate=0.2,
+        ),
+        _observation(
+            second_attack,
+            observation_id="report-a-second",
+            passed=True,
+            verifier="a",
+            reward_candidate=0.8,
+        ),
+        _observation(clean, observation_id="report-b-clean", passed=True, verifier="b"),
+        _observation(
+            first_attack,
+            observation_id="report-b-first",
+            passed=False,
+            verifier="b",
+        ),
+        _observation(
+            second_attack,
+            observation_id="report-b-second",
+            passed=False,
+            verifier="b",
+        ),
+    ]
+
+    report = calculate_benchmark_experiment_report(
+        dataset,
+        observations,
+        verifiers=["a", "b"],
+    )
+
+    assert report.dataset.total_cases == 3
+    assert [metrics.attack_success_rate for metrics in report.verifier_metrics] == [0.5, 0.0]
+    assert report.disagreement is not None
+    assert report.disagreement.disagreement_auroc == 0.75
+    assert report.reward_candidate_coverage == {"a": 1.0, "b": 0.0}
+    assert [pressure.verifier for pressure in report.optimization_pressure] == ["a"]
+    assert [
+        point.attack_success_rate for point in report.optimization_pressure[0].points
+    ] == [0.0, 1.0]
 
 
 def test_benchmark_evaluate_cli_outputs_json_metrics(tmp_path: Path) -> None:
@@ -899,3 +959,48 @@ def test_benchmark_pressure_cli_outputs_asr_curve(tmp_path: Path) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert [point["attack_success_rate"] for point in payload["points"]] == [0.0, 1.0]
+
+
+def test_benchmark_report_cli_writes_versioned_experiment_report(tmp_path: Path) -> None:
+    clean = _clean_case("report-cli")
+    dataset = build_attack_dataset(
+        [clean],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE],
+    )
+    attack = dataset[1]
+    cases_path = write_benchmark_cases(tmp_path / "cases.jsonl", dataset)
+    observations_path = write_verifier_observations(
+        tmp_path / "observations.jsonl",
+        [
+            _observation(clean, observation_id="report-cli-clean", passed=True, verifier="a"),
+            _observation(
+                attack,
+                observation_id="report-cli-attack",
+                passed=False,
+                verifier="a",
+                reward_candidate=0.2,
+            ),
+        ],
+    )
+    output_path = tmp_path / "report.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "report",
+            "--cases",
+            str(cases_path),
+            "--observations",
+            str(observations_path),
+            "--verifier",
+            "a",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "benchmark-experiment-report-v1"
+    assert payload["verifier_metrics"][0]["attack_families"][0]["attack_cases"] == 1

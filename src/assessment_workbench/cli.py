@@ -17,6 +17,7 @@ from assessment_workbench.application import (
 from assessment_workbench.benchmarking import (
     AttackKind,
     build_attack_dataset,
+    calculate_benchmark_experiment_report,
     calculate_optimization_pressure,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
@@ -209,6 +210,42 @@ def evaluate_optimization_pressure(
             verifier=verifier,
             trial=trial,
             candidate_budgets=budgets,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    _emit_json(report.model_dump_json(indent=2), output)
+
+
+@benchmark_app.command("report")
+def build_benchmark_experiment_report(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    observations_path: Annotated[
+        Path,
+        typer.Option(
+            "--observations",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    verifiers: Annotated[
+        list[str],
+        typer.Option("--verifier", help="Verifier ID; repeat for each experiment arm"),
+    ],
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+    output: Annotated[Path | None, typer.Option(help="Optional JSON output path")] = None,
+) -> None:
+    try:
+        report = calculate_benchmark_experiment_report(
+            read_benchmark_cases(cases_path),
+            read_verifier_observations(observations_path),
+            verifiers=verifiers,
+            trial=trial,
         )
     except (OSError, ValueError) as exc:
         typer.echo(_console_safe(exc, err=True), err=True)

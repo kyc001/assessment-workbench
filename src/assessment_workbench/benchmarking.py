@@ -26,6 +26,9 @@ BENCHMARK_CASE_SCHEMA_VERSION: Literal["benchmark-case-v1"] = "benchmark-case-v1
 VERIFIER_OBSERVATION_SCHEMA_VERSION: Literal["verifier-observation-v1"] = (
     "verifier-observation-v1"
 )
+EXPERIMENT_REPORT_SCHEMA_VERSION: Literal["benchmark-experiment-report-v1"] = (
+    "benchmark-experiment-report-v1"
+)
 
 
 class AttackKind(StrEnum):
@@ -120,6 +123,15 @@ class VerifierObservation(StrictModel):
     prompt_version: str | None = None
 
 
+class AttackFamilyMetrics(StrictModel):
+    attack_kind: AttackKind
+    attack_cases: int = Field(ge=1)
+    detected: int = Field(ge=0)
+    escaped: int = Field(ge=0)
+    detection_rate: float = Field(ge=0, le=1)
+    attack_success_rate: float = Field(ge=0, le=1)
+
+
 class VerifierMetrics(StrictModel):
     verifier: str
     trial: int = Field(ge=1)
@@ -135,6 +147,7 @@ class VerifierMetrics(StrictModel):
     f1: float | None = Field(default=None, ge=0, le=1)
     attack_success_rate: float | None = Field(default=None, ge=0, le=1)
     clean_acceptance_rate: float | None = Field(default=None, ge=0, le=1)
+    attack_families: list[AttackFamilyMetrics] = Field(default_factory=list)
 
 
 class CaseDisagreement(StrictModel):
@@ -176,6 +189,19 @@ class OptimizationPressureReport(StrictModel):
     attack_candidates: int = Field(ge=1)
     max_candidate_budget: int = Field(ge=1)
     points: list[OptimizationPressurePoint] = Field(min_length=1)
+
+
+class BenchmarkExperimentReport(StrictModel):
+    schema_version: Literal["benchmark-experiment-report-v1"] = (
+        EXPERIMENT_REPORT_SCHEMA_VERSION
+    )
+    trial: int = Field(ge=1)
+    dataset: BenchmarkDatasetSummary
+    verifiers: list[str] = Field(min_length=1)
+    verifier_metrics: list[VerifierMetrics] = Field(min_length=1)
+    disagreement: VerifierDisagreementMetrics | None = None
+    reward_candidate_coverage: dict[str, float]
+    optimization_pressure: list[OptimizationPressureReport] = Field(default_factory=list)
 
 
 _ATTACK_CHANGED_COMPONENTS: dict[AttackKind, frozenset[str]] = {
@@ -895,6 +921,7 @@ def calculate_verifier_metrics(
     false_negatives = 0
     clean_cases = 0
     attack_cases = 0
+    family_counts = {kind: [0, 0] for kind in AttackKind}
     for case in materialized_cases:
         observation = by_case[case.case_id]
         _validate_observation_signature(case, observation)
@@ -902,10 +929,13 @@ def calculate_verifier_metrics(
         rejected = not observation.report.passed
         if is_attack:
             attack_cases += 1
+            assert case.attack_kind is not None
             if rejected:
                 true_positives += 1
+                family_counts[case.attack_kind][0] += 1
             else:
                 false_negatives += 1
+                family_counts[case.attack_kind][1] += 1
         else:
             clean_cases += 1
             if rejected:
@@ -935,6 +965,18 @@ def calculate_verifier_metrics(
         f1=f1,
         attack_success_rate=false_negatives / attack_cases if attack_cases else None,
         clean_acceptance_rate=true_negatives / clean_cases if clean_cases else None,
+        attack_families=[
+            AttackFamilyMetrics(
+                attack_kind=kind,
+                attack_cases=detected + escaped,
+                detected=detected,
+                escaped=escaped,
+                detection_rate=detected / (detected + escaped),
+                attack_success_rate=escaped / (detected + escaped),
+            )
+            for kind, (detected, escaped) in family_counts.items()
+            if detected + escaped > 0
+        ],
     )
 
 
@@ -1121,6 +1163,83 @@ def calculate_optimization_pressure(
         attack_candidates=len(attack_cases),
         max_candidate_budget=max_budget,
         points=points,
+    )
+
+
+def calculate_benchmark_experiment_report(
+    cases: Iterable[BenchmarkCase],
+    observations: Iterable[VerifierObservation],
+    *,
+    verifiers: Iterable[str],
+    trial: int = 1,
+) -> BenchmarkExperimentReport:
+    materialized_cases = list(cases)
+    dataset_summary = validate_benchmark_dataset(materialized_cases)
+    materialized_observations = list(observations)
+    _validate_observation_ids(materialized_observations)
+    selected_verifiers = list(verifiers)
+    if not selected_verifiers:
+        raise ValueError("benchmark experiment report requires at least one verifier")
+    if any(not verifier.strip() for verifier in selected_verifiers):
+        raise ValueError("verifier ids cannot be empty")
+    if len(selected_verifiers) != len(set(selected_verifiers)):
+        raise ValueError("verifier ids must be unique")
+
+    verifier_metrics = [
+        calculate_verifier_metrics(
+            materialized_cases,
+            materialized_observations,
+            verifier=verifier,
+            trial=trial,
+        )
+        for verifier in selected_verifiers
+    ]
+    disagreement = None
+    if len(selected_verifiers) >= 2:
+        disagreement = calculate_verifier_disagreement(
+            materialized_cases,
+            materialized_observations,
+            verifiers=selected_verifiers,
+            trial=trial,
+        )
+
+    attack_case_ids = {
+        case.case_id for case in materialized_cases if case.attack_kind is not None
+    }
+    reward_candidate_coverage: dict[str, float] = {}
+    optimization_pressure: list[OptimizationPressureReport] = []
+    for verifier in selected_verifiers:
+        selected_attack_observations = [
+            observation
+            for observation in materialized_observations
+            if observation.report.reviewer == verifier
+            and observation.trial == trial
+            and observation.case_id in attack_case_ids
+        ]
+        reward_count = sum(
+            observation.reward_candidate is not None
+            for observation in selected_attack_observations
+        )
+        coverage = reward_count / len(attack_case_ids) if attack_case_ids else 0.0
+        reward_candidate_coverage[verifier] = coverage
+        if coverage == 1.0:
+            optimization_pressure.append(
+                calculate_optimization_pressure(
+                    materialized_cases,
+                    materialized_observations,
+                    verifier=verifier,
+                    trial=trial,
+                )
+            )
+
+    return BenchmarkExperimentReport(
+        trial=trial,
+        dataset=dataset_summary,
+        verifiers=selected_verifiers,
+        verifier_metrics=verifier_metrics,
+        disagreement=disagreement,
+        reward_candidate_coverage=reward_candidate_coverage,
+        optimization_pressure=optimization_pressure,
     )
 
 
