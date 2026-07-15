@@ -15,6 +15,7 @@ from assessment_workbench.application import (
     publish_question_bundle,
 )
 from assessment_workbench.benchmarking import (
+    calculate_verifier_disagreement,
     calculate_verifier_metrics,
     generate_rubric_loophole_attack,
     read_benchmark_cases,
@@ -111,6 +112,48 @@ def generate_rubric_loophole_benchmark(
     except (OSError, ValueError) as exc:
         typer.echo(_console_safe(exc, err=True), err=True)
         raise typer.Exit(1) from exc
+    typer.echo(output)
+
+
+@benchmark_app.command("disagreement")
+def evaluate_verifier_disagreement(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    observations_path: Annotated[
+        Path,
+        typer.Option(
+            "--observations",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    verifiers: Annotated[
+        list[str],
+        typer.Option("--verifier", help="Verifier ID; repeat for each ensemble member"),
+    ],
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+    output: Annotated[Path | None, typer.Option(help="Optional JSON output path")] = None,
+) -> None:
+    try:
+        metrics = calculate_verifier_disagreement(
+            read_benchmark_cases(cases_path),
+            read_verifier_observations(observations_path),
+            verifiers=verifiers,
+            trial=trial,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    payload = metrics.model_dump_json(indent=2)
+    if output is None:
+        typer.echo(payload)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(f"{payload}\n", encoding="utf-8")
     typer.echo(output)
 
 

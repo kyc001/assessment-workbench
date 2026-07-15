@@ -451,6 +451,43 @@ def test_benchmark_evaluate_cli_outputs_json_metrics(tmp_path: Path) -> None:
     assert payload["attack_success_rate"] == 0.0
 
 
+def test_benchmark_disagreement_cli_outputs_auroc(tmp_path: Path) -> None:
+    clean = _clean_case("clean-cli-disagreement")
+    attack = _attack_case("attack-cli-disagreement", clean.case_id)
+    cases_path = write_benchmark_cases(tmp_path / "cases.jsonl", [clean, attack])
+    observations_path = write_verifier_observations(
+        tmp_path / "observations.jsonl",
+        [
+            _observation(clean, observation_id="clean-a", passed=True, verifier="a"),
+            _observation(clean, observation_id="clean-b", passed=True, verifier="b"),
+            _observation(attack, observation_id="attack-a", passed=True, verifier="a"),
+            _observation(attack, observation_id="attack-b", passed=False, verifier="b"),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "disagreement",
+            "--cases",
+            str(cases_path),
+            "--observations",
+            str(observations_path),
+            "--verifier",
+            "a",
+            "--verifier",
+            "b",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["verifiers"] == ["a", "b"]
+    assert payload["disagreement_auroc"] == 1.0
+    assert payload["cases"][1]["disagreement"] == 1.0
+
+
 def test_benchmark_attack_rubric_cli_writes_paired_cases(tmp_path: Path) -> None:
     clean = _clean_case("clean-cli-attack")
     cases_path = write_benchmark_cases(tmp_path / "clean.jsonl", [clean])
