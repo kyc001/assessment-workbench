@@ -245,6 +245,7 @@ async def test_exam_reviewer_failure_retries_only_that_reviewer(tmp_path: Path) 
         exam=exam,
         capability_context={},
         restored_records=None,
+        input_artifact_ids=[],
     )
 
     assert model.calls["exam_duplication_reviewer"] == 2

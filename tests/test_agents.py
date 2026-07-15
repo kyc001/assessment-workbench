@@ -11,7 +11,6 @@ from assessment_workbench.agents import ExamAgentWorkflow, ModelRouter
 from assessment_workbench.domain import (
     ArbitrationAction,
     ArbitrationDecision,
-    BlueprintDraft,
     ContextPack,
     CoverageTarget,
     DifficultyDistribution,
@@ -20,8 +19,11 @@ from assessment_workbench.domain import (
     ExamBlueprint,
     ExamDocument,
     ExamPlanningMode,
+    ExamReviewFinding,
     ExamReviewReport,
+    ExamReviewTarget,
     ExamSectionBlueprint,
+    FindingSeverity,
     HumanDecision,
     HumanDecisionType,
     QuestionDraft,
@@ -40,7 +42,6 @@ from assessment_workbench.domain import (
     SolutionDraft,
     SolutionStep,
     SubjectProfile,
-    SubjectProfileCandidate,
 )
 from assessment_workbench.storage import ArtifactStore, RunStore, Workspace
 
@@ -200,13 +201,13 @@ async def test_question_resume_reuses_completed_problem_stage(tmp_path: Path) ->
         {
             "question_writer": [question],
             "rubric_builder": [rubric],
-            "solvability_reviewer": [passed_review],
         }
     )
     strong = FixtureModel(
         {
             "independent_solver": [KeyboardInterrupt(), solution],
             "question_arbiter": [passed],
+            "solvability_reviewer": [passed_review],
         }
     )
     workspace = Workspace(tmp_path / "workspace")
@@ -260,14 +261,14 @@ async def test_reviewer_failure_retries_only_failed_reviewer(tmp_path: Path) -> 
         {
             "question_writer": [question],
             "rubric_builder": [rubric],
-            "solvability_reviewer": [RuntimeError("temporary failure"), solvability_passed],
-            "pedagogical_reviewer": [pedagogical_passed],
         }
     )
     strong = FixtureModel(
         {
             "independent_solver": [solution],
             "question_arbiter": [passed],
+            "solvability_reviewer": [RuntimeError("temporary failure"), solvability_passed],
+            "pedagogical_reviewer": [pedagogical_passed],
         }
     )
     workspace = Workspace(tmp_path / "workspace")
@@ -287,8 +288,8 @@ async def test_reviewer_failure_retries_only_failed_reviewer(tmp_path: Path) -> 
     )
 
     assert run.status is RunStatus.SUCCEEDED
-    assert standard.calls["solvability_reviewer"] == 2
-    assert standard.calls["pedagogical_reviewer"] == 1
+    assert strong.calls["solvability_reviewer"] == 2
+    assert strong.calls["pedagogical_reviewer"] == 1
     manifest = artifacts.latest(run.id, "review-runs.json")
     assert manifest is not None
     payload = artifacts.read_json(manifest.id)
@@ -337,7 +338,6 @@ async def test_parent_manifest_exposes_child_run_before_writer_finishes(tmp_path
         {
             "question_writer": [question],
             "rubric_builder": [rubric],
-            "solvability_reviewer": [passed_review],
         }
     )
     strong = FixtureModel(
@@ -345,6 +345,7 @@ async def test_parent_manifest_exposes_child_run_before_writer_finishes(tmp_path
             "question_set_planner": [plan_set],
             "independent_solver": [solution],
             "question_arbiter": [passed],
+            "solvability_reviewer": [passed_review],
         }
     )
     workspace = Workspace(tmp_path / "workspace")
@@ -382,16 +383,19 @@ async def test_parent_manifest_exposes_child_run_before_writer_finishes(tmp_path
 
 
 async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None:
-    profile = SubjectProfileCandidate(
-        subject_id="mathematics",
+    profile = SubjectProfile(
+        id="mathematics",
         display_name="Mathematics",
         supported_question_types=[QuestionType.CALCULATION],
         reviewers=[ReviewerName.SOLVABILITY, ReviewerName.STRUCTURE],
+        latex_template="generic-v1",
         difficulty_dimensions=["reasoning"],
         conventions=["Use standard algebraic notation"],
         source_summary="User requirements",
     )
-    blueprint = BlueprintDraft(
+    blueprint = ExamBlueprint(
+        id="generated-assessment",
+        subject_profile=profile.id,
         title="Generated assessment",
         target_level="Grade 12",
         duration_minutes=30,
@@ -466,16 +470,14 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
         {
             "question_writer": [question],
             "rubric_builder": [rubric, rubric],
-            "solvability_reviewer": [failed_review, passed_review],
         }
     )
     strong = FixtureModel(
         {
-            "subject_researcher": [profile],
-            "exam_blueprint_planner": [blueprint],
             "question_set_planner": [question_plans],
             "independent_solver": [wrong_solution, correct_solution],
             "question_arbiter": [retry, passed],
+            "solvability_reviewer": [failed_review, passed_review],
         }
     )
     workspace = Workspace(tmp_path / "workspace")
@@ -490,31 +492,14 @@ async def test_exam_agents_retry_only_invalid_dependency(tmp_path: Path) -> None
         subject="mathematics",
         target_level="Grade 12",
         requirements="One question",
-        require_blueprint_approval=True,
+        subject_profile=profile,
+        blueprint=blueprint,
     )
-
-    assert run.status is RunStatus.WAITING_HUMAN
-    assert strong.calls["subject_researcher"] == 1
-    assert strong.calls["exam_blueprint_planner"] == 1
-    assert strong.calls["question_set_planner"] == 0
-    request = runs.pending_human_review(run.id)
-    assert request is not None
-    runs.resolve_human_review(
-        HumanDecision(
-            request_id=request.id,
-            run_id=run.id,
-            decision=HumanDecisionType.ACCEPT,
-            actor="tester",
-        )
-    )
-    run, state = await workflow.resume(run.id)
 
     assert run.status is RunStatus.SUCCEEDED
-    assert state["planning"].mode is ExamPlanningMode.AGENT
+    assert state["planning"].mode is ExamPlanningMode.PRESET
     assert state["profile"].conventions == ["Use standard algebraic notation"]
     assert state["profile"].source_summary == "User requirements"
-    assert strong.calls["subject_researcher"] == 1
-    assert strong.calls["exam_blueprint_planner"] == 1
     assert strong.calls["question_set_planner"] == 1
     assert state["exam"].questions[0].solution.final_answer[0].content == "x = 3"
     assert standard.calls["question_writer"] == 1
@@ -757,6 +742,22 @@ async def test_exam_arbitration_regenerates_only_target_section(tmp_path: Path) 
             "question_set_planner": [QuestionPlanSetDraft(plans=plan_drafts)],
             "independent_solver": solutions,
             "question_arbiter": [question_pass, question_pass, question_pass],
+            "exam_consistency_reviewer": [
+                ExamReviewReport(
+                    reviewer="consistency",
+                    passed=False,
+                    findings=[
+                        ExamReviewFinding(
+                            code="section_replacement_required",
+                            severity=FindingSeverity.ERROR,
+                            target=ExamReviewTarget.SECTION,
+                            section_ids=["algebra"],
+                            message="Replace only the algebra section.",
+                        )
+                    ],
+                ),
+                ExamReviewReport(reviewer="consistency", passed=True),
+            ],
             "exam_arbiter": [
                 ExamArbitrationDecision(
                     action=ExamArbitrationAction.REGENERATE_SECTION,
