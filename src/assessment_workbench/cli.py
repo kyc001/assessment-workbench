@@ -17,6 +17,7 @@ from assessment_workbench.application import (
 from assessment_workbench.benchmarking import (
     AttackKind,
     build_attack_dataset,
+    calculate_optimization_pressure,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
     read_benchmark_cases,
@@ -175,6 +176,44 @@ def validate_benchmark(
         typer.echo(_console_safe(exc, err=True), err=True)
         raise typer.Exit(1) from exc
     _emit_json(summary.model_dump_json(indent=2), output)
+
+
+@benchmark_app.command("pressure")
+def evaluate_optimization_pressure(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    observations_path: Annotated[
+        Path,
+        typer.Option(
+            "--observations",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    verifier: Annotated[str, typer.Option(help="Verifier ID used as the reward source")],
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+    budgets: Annotated[
+        list[int] | None,
+        typer.Option("--budget", min=1, help="Candidate budget N; repeat as needed"),
+    ] = None,
+    output: Annotated[Path | None, typer.Option(help="Optional JSON output path")] = None,
+) -> None:
+    try:
+        report = calculate_optimization_pressure(
+            read_benchmark_cases(cases_path),
+            read_verifier_observations(observations_path),
+            verifier=verifier,
+            trial=trial,
+            candidate_budgets=budgets,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    _emit_json(report.model_dump_json(indent=2), output)
 
 
 @benchmark_app.command("disagreement")

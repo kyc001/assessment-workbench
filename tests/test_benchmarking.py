@@ -14,6 +14,7 @@ from assessment_workbench.benchmarking import (
     OracleVerdict,
     VerifierObservation,
     build_attack_dataset,
+    calculate_optimization_pressure,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
     generate_benchmark_attack,
@@ -118,6 +119,7 @@ def _observation(
     observation_id: str,
     passed: bool,
     verifier: str = "specialized_ensemble",
+    reward_candidate: float | None = None,
 ) -> VerifierObservation:
     findings = []
     if not passed:
@@ -141,6 +143,7 @@ def _observation(
             findings=findings,
         ),
         confidence=0.9,
+        reward_candidate=reward_candidate,
         model="fixture-verifier",
         prompt_version="fixture-v1",
     )
@@ -345,6 +348,17 @@ def test_validate_benchmark_dataset_rejects_mutation_profile_mismatch() -> None:
 
     with pytest.raises(ValueError, match="question changed outside"):
         validate_benchmark_dataset([clean, attacked])
+
+
+def test_validate_benchmark_dataset_requires_contiguous_candidate_indices() -> None:
+    dataset = build_attack_dataset(
+        [_clean_case()],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE, AttackKind.SHARED_FALSE_PREMISE],
+    )
+    dataset[2] = dataset[2].model_copy(update={"candidate_index": 3})
+
+    with pytest.raises(ValueError, match="candidate indices must be contiguous"):
+        validate_benchmark_dataset(dataset)
 
 
 def test_generate_rubric_loophole_attack_versions_only_the_rubric() -> None:
@@ -594,6 +608,69 @@ def test_verifier_disagreement_rejects_version_mismatch() -> None:
         )
 
 
+def test_optimization_pressure_reports_attack_success_at_each_budget() -> None:
+    first = _clean_case("pressure-first")
+    second = _clean_case("pressure-second")
+    attack_kinds = [
+        AttackKind.RUBRIC_LOOPHOLE,
+        AttackKind.SHARED_FALSE_PREMISE,
+        AttackKind.UNDERSPECIFIED_QUESTION,
+    ]
+    dataset = build_attack_dataset([first, second], attack_kinds=attack_kinds)
+    attacks = [case for case in dataset if case.attack_kind is not None]
+    outcomes = {
+        "pressure-first": [(0.2, False), (0.9, True), (0.8, False)],
+        "pressure-second": [(0.7, False), (0.6, True), (0.95, True)],
+    }
+    observations = []
+    for attack in attacks:
+        assert attack.parent_case_id is not None
+        assert attack.candidate_index is not None
+        reward, passed = outcomes[attack.parent_case_id][attack.candidate_index - 1]
+        observations.append(
+            _observation(
+                attack,
+                observation_id=f"pressure-{attack.case_id}",
+                passed=passed,
+                verifier="reward_verifier",
+                reward_candidate=reward,
+            )
+        )
+
+    report = calculate_optimization_pressure(
+        dataset,
+        observations,
+        verifier="reward_verifier",
+    )
+
+    assert report.max_candidate_budget == 3
+    assert [point.attack_success_rate for point in report.points] == [0.0, 0.5, 1.0]
+    assert report.points[1].mean_selected_reward == pytest.approx(0.8)
+    assert report.points[2].mean_selected_reward == pytest.approx(0.925)
+
+
+def test_optimization_pressure_requires_candidate_rewards() -> None:
+    dataset = build_attack_dataset(
+        [_clean_case("pressure-missing-reward")],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE],
+    )
+    attack = dataset[1]
+
+    with pytest.raises(ValueError, match="requires reward_candidate"):
+        calculate_optimization_pressure(
+            dataset,
+            [
+                _observation(
+                    attack,
+                    observation_id="missing-reward",
+                    passed=True,
+                    verifier="reward_verifier",
+                )
+            ],
+            verifier="reward_verifier",
+        )
+
+
 def test_benchmark_evaluate_cli_outputs_json_metrics(tmp_path: Path) -> None:
     clean = _clean_case("clean-cli")
     attack = _attack_case("attack-cli", clean.case_id)
@@ -776,3 +853,49 @@ def test_benchmark_validate_cli_outputs_dataset_summary(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["total_cases"] == 2
     assert payload["attack_counts"][AttackKind.RUBRIC_LOOPHOLE.value] == 1
+
+
+def test_benchmark_pressure_cli_outputs_asr_curve(tmp_path: Path) -> None:
+    dataset = build_attack_dataset(
+        [_clean_case("pressure-cli")],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE, AttackKind.SHARED_FALSE_PREMISE],
+    )
+    attacks = [case for case in dataset if case.attack_kind is not None]
+    cases_path = write_benchmark_cases(tmp_path / "cases.jsonl", dataset)
+    observations_path = write_verifier_observations(
+        tmp_path / "observations.jsonl",
+        [
+            _observation(
+                attacks[0],
+                observation_id="pressure-cli-1",
+                passed=False,
+                verifier="reward_verifier",
+                reward_candidate=0.3,
+            ),
+            _observation(
+                attacks[1],
+                observation_id="pressure-cli-2",
+                passed=True,
+                verifier="reward_verifier",
+                reward_candidate=0.8,
+            ),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "pressure",
+            "--cases",
+            str(cases_path),
+            "--observations",
+            str(observations_path),
+            "--verifier",
+            "reward_verifier",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert [point["attack_success_rate"] for point in payload["points"]] == [0.0, 1.0]
