@@ -1,8 +1,10 @@
+import json
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
 from assessment_workbench.benchmarking import (
     AttackKind,
@@ -17,6 +19,7 @@ from assessment_workbench.benchmarking import (
     write_benchmark_cases,
     write_verifier_observations,
 )
+from assessment_workbench.cli import app
 from assessment_workbench.domain import (
     ExamQuestionBundle,
     FindingSeverity,
@@ -262,3 +265,36 @@ def test_verifier_metrics_require_one_observation_per_case() -> None:
             [_observation(first, observation_id="obs-001", passed=True)],
             verifier="specialized_ensemble",
         )
+
+
+def test_benchmark_evaluate_cli_outputs_json_metrics(tmp_path: Path) -> None:
+    clean = _clean_case("clean-cli")
+    attack = _attack_case("attack-cli", clean.case_id)
+    cases_path = write_benchmark_cases(tmp_path / "cases.jsonl", [clean, attack])
+    observations_path = write_verifier_observations(
+        tmp_path / "observations.jsonl",
+        [
+            _observation(clean, observation_id="obs-clean-cli", passed=True),
+            _observation(attack, observation_id="obs-attack-cli", passed=False),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "evaluate",
+            "--cases",
+            str(cases_path),
+            "--observations",
+            str(observations_path),
+            "--verifier",
+            "specialized_ensemble",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["precision"] == 1.0
+    assert payload["recall"] == 1.0
+    assert payload["attack_success_rate"] == 0.0

@@ -14,6 +14,11 @@ from assessment_workbench.application import (
     open_workspace,
     publish_question_bundle,
 )
+from assessment_workbench.benchmarking import (
+    calculate_verifier_metrics,
+    read_benchmark_cases,
+    read_verifier_observations,
+)
 from assessment_workbench.config import Settings
 from assessment_workbench.document_workflow import latest_document_builds
 from assessment_workbench.domain import (
@@ -64,6 +69,7 @@ runs_app = typer.Typer(help="Inspect workflow runs")
 knowledge_app = typer.Typer(help="Search course knowledge")
 questions_app = typer.Typer(help="Plan and generate questions")
 exams_app = typer.Typer(help="Plan, generate, and export exams")
+benchmark_app = typer.Typer(help="Build and evaluate verifier benchmarks")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(materials_app, name="materials")
 app.add_typer(topics_app, name="topics")
@@ -71,6 +77,7 @@ app.add_typer(runs_app, name="runs")
 app.add_typer(knowledge_app, name="knowledge")
 app.add_typer(questions_app, name="questions")
 app.add_typer(exams_app, name="exams")
+app.add_typer(benchmark_app, name="benchmark")
 
 
 def _workspace(path: Path | None) -> Workspace:
@@ -82,6 +89,45 @@ def _console_safe(value: object, *, err: bool = False) -> str:
     stream = sys.stderr if err else sys.stdout
     encoding = getattr(stream, "encoding", None) or "utf-8"
     return text.encode(encoding, errors="replace").decode(encoding)
+
+
+@benchmark_app.command("evaluate")
+def evaluate_benchmark(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    observations_path: Annotated[
+        Path,
+        typer.Option(
+            "--observations",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    verifier: Annotated[str, typer.Option(help="Verifier ID stored in ReviewReport.reviewer")],
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+    output: Annotated[Path | None, typer.Option(help="Optional JSON output path")] = None,
+) -> None:
+    try:
+        metrics = calculate_verifier_metrics(
+            read_benchmark_cases(cases_path),
+            read_verifier_observations(observations_path),
+            verifier=verifier,
+            trial=trial,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    payload = metrics.model_dump_json(indent=2)
+    if output is None:
+        typer.echo(payload)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(f"{payload}\n", encoding="utf-8")
+    typer.echo(output)
 
 
 def _artifact_display_path(
