@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from enum import StrEnum
 from pathlib import Path
+from statistics import pstdev
 from typing import Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -29,6 +30,9 @@ VERIFIER_OBSERVATION_SCHEMA_VERSION: Literal["verifier-observation-v1"] = (
 )
 EXPERIMENT_REPORT_SCHEMA_VERSION: Literal["benchmark-experiment-report-v1"] = (
     "benchmark-experiment-report-v1"
+)
+MULTI_TRIAL_REPORT_SCHEMA_VERSION: Literal["benchmark-multi-trial-report-v1"] = (
+    "benchmark-multi-trial-report-v1"
 )
 
 
@@ -208,6 +212,42 @@ class BenchmarkExperimentReport(StrictModel):
     disagreement: VerifierDisagreementMetrics | None = None
     reward_candidate_coverage: dict[str, float]
     optimization_pressure: list[OptimizationPressureReport] = Field(default_factory=list)
+
+
+class MetricDistribution(StrictModel):
+    mean: float
+    population_std: float = Field(ge=0)
+    minimum: float
+    maximum: float
+    values: list[float] = Field(min_length=1)
+
+
+class AttackFamilyMultiTrialMetrics(StrictModel):
+    attack_kind: AttackKind
+    detection_rate: MetricDistribution
+    attack_success_rate: MetricDistribution
+
+
+class VerifierMultiTrialMetrics(StrictModel):
+    verifier: str
+    trial_count: int = Field(ge=1)
+    precision: MetricDistribution
+    recall: MetricDistribution | None = None
+    f1: MetricDistribution | None = None
+    attack_success_rate: MetricDistribution | None = None
+    clean_acceptance_rate: MetricDistribution | None = None
+    attack_families: list[AttackFamilyMultiTrialMetrics] = Field(default_factory=list)
+
+
+class BenchmarkMultiTrialReport(StrictModel):
+    schema_version: Literal["benchmark-multi-trial-report-v1"] = (
+        MULTI_TRIAL_REPORT_SCHEMA_VERSION
+    )
+    trials: list[int] = Field(min_length=1)
+    dataset: BenchmarkDatasetSummary
+    verifiers: list[str] = Field(min_length=1)
+    verifier_metrics: list[VerifierMultiTrialMetrics] = Field(min_length=1)
+    disagreement_auroc: MetricDistribution | None = None
 
 
 _ATTACK_CHANGED_COMPONENTS: dict[AttackKind, frozenset[str]] = {
@@ -1320,6 +1360,129 @@ def calculate_benchmark_experiment_report(
         reward_candidate_coverage=reward_candidate_coverage,
         optimization_pressure=optimization_pressure,
     )
+
+
+def calculate_benchmark_multi_trial_report(
+    cases: Iterable[BenchmarkCase],
+    observations: Iterable[VerifierObservation],
+    *,
+    verifiers: Iterable[str],
+    trials: Iterable[int] | None = None,
+) -> BenchmarkMultiTrialReport:
+    materialized_cases = list(cases)
+    materialized_observations = list(observations)
+    selected_verifiers = list(verifiers)
+    if not selected_verifiers:
+        raise ValueError("multi-trial report requires at least one verifier")
+    selected_trials = (
+        list(trials)
+        if trials is not None
+        else sorted(
+            {
+                observation.trial
+                for observation in materialized_observations
+                if observation.report.reviewer in set(selected_verifiers)
+            }
+        )
+    )
+    if not selected_trials:
+        raise ValueError("multi-trial report requires at least one trial")
+    if selected_trials != sorted(set(selected_trials)) or selected_trials[0] < 1:
+        raise ValueError("multi-trial report trials must be unique and strictly increasing")
+    trial_reports = [
+        calculate_benchmark_experiment_report(
+            materialized_cases,
+            materialized_observations,
+            verifiers=selected_verifiers,
+            trial=trial,
+        )
+        for trial in selected_trials
+    ]
+
+    verifier_metrics: list[VerifierMultiTrialMetrics] = []
+    for verifier in selected_verifiers:
+        metrics = [
+            next(item for item in report.verifier_metrics if item.verifier == verifier)
+            for report in trial_reports
+        ]
+        family_metrics: list[AttackFamilyMultiTrialMetrics] = []
+        for attack_kind in AttackKind:
+            family = [
+                next(
+                    (
+                        item
+                        for item in metric.attack_families
+                        if item.attack_kind is attack_kind
+                    ),
+                    None,
+                )
+                for metric in metrics
+            ]
+            if all(item is not None for item in family):
+                complete_family = [item for item in family if item is not None]
+                family_metrics.append(
+                    AttackFamilyMultiTrialMetrics(
+                        attack_kind=attack_kind,
+                        detection_rate=_metric_distribution(
+                            [item.detection_rate for item in complete_family]
+                        ),
+                        attack_success_rate=_metric_distribution(
+                            [item.attack_success_rate for item in complete_family]
+                        ),
+                    )
+                )
+        verifier_metrics.append(
+            VerifierMultiTrialMetrics(
+                verifier=verifier,
+                trial_count=len(selected_trials),
+                precision=_metric_distribution([item.precision for item in metrics]),
+                recall=_optional_metric_distribution([item.recall for item in metrics]),
+                f1=_optional_metric_distribution([item.f1 for item in metrics]),
+                attack_success_rate=_optional_metric_distribution(
+                    [item.attack_success_rate for item in metrics]
+                ),
+                clean_acceptance_rate=_optional_metric_distribution(
+                    [item.clean_acceptance_rate for item in metrics]
+                ),
+                attack_families=family_metrics,
+            )
+        )
+
+    disagreement_values = [
+        report.disagreement.disagreement_auroc
+        for report in trial_reports
+        if report.disagreement is not None
+        and report.disagreement.disagreement_auroc is not None
+    ]
+    return BenchmarkMultiTrialReport(
+        trials=selected_trials,
+        dataset=trial_reports[0].dataset,
+        verifiers=selected_verifiers,
+        verifier_metrics=verifier_metrics,
+        disagreement_auroc=(
+            _metric_distribution(disagreement_values) if disagreement_values else None
+        ),
+    )
+
+
+def _metric_distribution(values: list[float]) -> MetricDistribution:
+    if not values:
+        raise ValueError("metric distribution requires at least one value")
+    return MetricDistribution(
+        mean=sum(values) / len(values),
+        population_std=pstdev(values),
+        minimum=min(values),
+        maximum=max(values),
+        values=values,
+    )
+
+
+def _optional_metric_distribution(
+    values: list[float | None],
+) -> MetricDistribution | None:
+    if any(value is None for value in values):
+        return None
+    return _metric_distribution([value for value in values if value is not None])
 
 
 def _validate_case_ids(cases: list[BenchmarkCase]) -> None:

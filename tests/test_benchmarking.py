@@ -16,6 +16,7 @@ from assessment_workbench.benchmarking import (
     VerifierObservation,
     build_attack_dataset,
     calculate_benchmark_experiment_report,
+    calculate_benchmark_multi_trial_report,
     calculate_optimization_pressure,
     calculate_verifier_disagreement,
     calculate_verifier_metrics,
@@ -123,6 +124,7 @@ def _observation(
     passed: bool,
     verifier: str = "specialized_ensemble",
     reward_candidate: float | None = None,
+    trial: int = 1,
 ) -> VerifierObservation:
     findings = []
     if not passed:
@@ -137,6 +139,7 @@ def _observation(
     return VerifierObservation(
         observation_id=observation_id,
         case_id=case.case_id,
+        trial=trial,
         question_version_id=case.bundle.question.id,
         solution_version_id=case.bundle.solution.id,
         rubric_version_id=case.bundle.rubric.id,
@@ -799,6 +802,61 @@ def test_benchmark_experiment_report_combines_metrics_and_pressure() -> None:
     ] == [0.0, 1.0]
 
 
+def test_benchmark_multi_trial_report_aggregates_metric_distributions() -> None:
+    clean = _clean_case("multi-trial-clean")
+    dataset = build_attack_dataset(
+        [clean],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE],
+    )
+    attack = dataset[1]
+    observations = [
+        _observation(
+            clean,
+            observation_id="multi-clean-1",
+            passed=True,
+            verifier="judge",
+            trial=1,
+        ),
+        _observation(
+            attack,
+            observation_id="multi-attack-1",
+            passed=True,
+            verifier="judge",
+            reward_candidate=0.8,
+            trial=1,
+        ),
+        _observation(
+            clean,
+            observation_id="multi-clean-2",
+            passed=True,
+            verifier="judge",
+            trial=2,
+        ),
+        _observation(
+            attack,
+            observation_id="multi-attack-2",
+            passed=False,
+            verifier="judge",
+            reward_candidate=0.2,
+            trial=2,
+        ),
+    ]
+
+    report = calculate_benchmark_multi_trial_report(
+        dataset,
+        observations,
+        verifiers=["judge"],
+    )
+
+    metrics = report.verifier_metrics[0]
+    assert report.trials == [1, 2]
+    assert metrics.attack_success_rate is not None
+    assert metrics.attack_success_rate.values == [1.0, 0.0]
+    assert metrics.attack_success_rate.mean == 0.5
+    assert metrics.attack_success_rate.population_std == 0.5
+    assert metrics.attack_families[0].detection_rate.values == [0.0, 1.0]
+
+
 def test_benchmark_evaluate_cli_outputs_json_metrics(tmp_path: Path) -> None:
     clean = _clean_case("clean-cli")
     attack = _attack_case("attack-cli", clean.case_id)
@@ -1097,6 +1155,71 @@ def test_benchmark_report_cli_writes_versioned_experiment_report(tmp_path: Path)
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "benchmark-experiment-report-v1"
     assert payload["verifier_metrics"][0]["attack_families"][0]["attack_cases"] == 1
+
+
+def test_benchmark_report_multi_cli_infers_trials(tmp_path: Path) -> None:
+    clean = _clean_case("report-multi-cli")
+    dataset = build_attack_dataset(
+        [clean],
+        attack_kinds=[AttackKind.RUBRIC_LOOPHOLE],
+    )
+    attack = dataset[1]
+    cases_path = write_benchmark_cases(tmp_path / "cases.jsonl", dataset)
+    observations_path = write_verifier_observations(
+        tmp_path / "observations.jsonl",
+        [
+            _observation(
+                clean,
+                observation_id="report-multi-clean-1",
+                passed=True,
+                verifier="judge",
+                trial=1,
+            ),
+            _observation(
+                attack,
+                observation_id="report-multi-attack-1",
+                passed=True,
+                verifier="judge",
+                reward_candidate=0.8,
+                trial=1,
+            ),
+            _observation(
+                clean,
+                observation_id="report-multi-clean-2",
+                passed=True,
+                verifier="judge",
+                trial=2,
+            ),
+            _observation(
+                attack,
+                observation_id="report-multi-attack-2",
+                passed=False,
+                verifier="judge",
+                reward_candidate=0.2,
+                trial=2,
+            ),
+        ],
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "report-multi",
+            "--cases",
+            str(cases_path),
+            "--observations",
+            str(observations_path),
+            "--verifier",
+            "judge",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["schema_version"] == "benchmark-multi-trial-report-v1"
+    assert payload["trials"] == [1, 2]
+    assert payload["verifier_metrics"][0]["attack_success_rate"]["mean"] == 0.5
 
 
 def test_committed_synthetic_benchmark_fixture_replays_exactly() -> None:
