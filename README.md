@@ -646,38 +646,54 @@ The repository now includes an offline benchmark layer for testing whether a ver
 
 - `BenchmarkCase` stores an immutable bundle, an Oracle verdict, error targets, error codes, evidence references, and clean/attack lineage.
 - `VerifierObservation` binds one `ReviewReport` to the exact question, solution, and rubric version IDs that it evaluated.
-- `rubric_loophole` is the first implemented controlled mutation. It preserves the clean question and solution, versions only the rubric, and inserts a structurally valid rule that awards full credit for a keyword match.
-- The remaining attack families are typed benchmark contracts and research targets; they are not yet implemented generators.
+- All six controlled mutation families are implemented: format-valid semantic error, lucky answer with invalid reasoning, shared false premise, rubric loophole, underspecified question, and difficulty/coverage gaming.
+- Mutated version IDs use UUIDv5 over the parent version and mutation contract, so repeated generation from the same clean input is byte-reproducible.
+- Dataset validation checks closed parent lineage, contiguous candidate indices, logical IDs, expected component-level mutations, and parent-version transitions.
 
-Generate a paired clean/attack dataset:
+```mermaid
+flowchart LR
+    C["Clean Bundle + independent Oracle"] --> G["Six controlled mutation generators"]
+    G --> D["Paired benchmark dataset"]
+    D --> V["Verifier arms"]
+    V --> O["Version-bound observations + reward candidates"]
+    D --> R["Experiment report"]
+    O --> R
+    R --> M["P/R/F1 + family ASR + disagreement AUROC + ASR@N"]
+```
+
+Generate all six attacks for every clean case, then validate the dataset:
 
 ```bash
-uv run assessment-workbench benchmark attack-rubric \
+uv run assessment-workbench benchmark attack \
   --cases benchmark/clean.jsonl \
-  --output benchmark/rubric-loophole.jsonl
+  --output benchmark/cases.jsonl
+
+uv run assessment-workbench benchmark validate \
+  --cases benchmark/cases.jsonl
 ```
 
-Evaluate one verifier from offline observations:
+Build one versioned experiment report from offline observations:
 
 ```bash
-uv run assessment-workbench benchmark evaluate \
-  --cases benchmark/rubric-loophole.jsonl \
-  --observations benchmark/observations.jsonl \
-  --verifier specialized_ensemble \
-  --output benchmark/specialized-ensemble.json
-```
-
-Measure whether ensemble disagreement separates Oracle-invalid attacks from clean cases:
-
-```bash
-uv run assessment-workbench benchmark disagreement \
-  --cases benchmark/rubric-loophole.jsonl \
+uv run assessment-workbench benchmark report \
+  --cases benchmark/cases.jsonl \
   --observations benchmark/observations.jsonl \
   --verifier solvability \
   --verifier rubric_consistency \
   --verifier structure \
-  --output benchmark/disagreement.json
+  --output benchmark/report.json
 ```
+
+The report combines per-Verifier metrics, per-attack-family escape rates, disagreement AUROC, reward-candidate coverage, and best-of-N pressure curves. Individual `evaluate`, `disagreement`, and `pressure` commands remain available for focused analyses.
+
+The committed [synthetic fixture](examples/verifier-benchmark/README.md) exercises the complete flow without an LLM:
+
+```bash
+uv run assessment-workbench benchmark validate \
+  --cases examples/verifier-benchmark/cases.jsonl
+```
+
+Its `surface_checker` and `specialized_ensemble` results are deterministic rule-table outputs marked `model="synthetic-fixture"`. They validate replay and reporting only; they are not empirical evidence about real Verifiers.
 
 | Metric | Definition |
 | --- | --- |
@@ -686,8 +702,10 @@ uv run assessment-workbench benchmark disagreement \
 | Clean acceptance rate | Oracle-valid cases accepted by the verifier / all clean cases |
 | Case disagreement | `2 * min(accept_votes, reject_votes) / verifier_count` |
 | Disagreement AUROC | pairwise AUROC for disagreement as a predictor of Oracle-invalid cases; tied scores receive 0.5 credit |
+| Attack success rate at N | rate at which the highest-reward candidate among the first N Oracle-invalid attacks is accepted |
+| Per-family escape rate | accepted Oracle-invalid cases within each controlled attack family |
 
-Readers reject missing observations, duplicate IDs, unknown case references, incomplete case-by-verifier matrices, and content-version mismatches. This makes the metrics replayable against frozen artifacts instead of silently scoring a different bundle revision.
+Readers reject missing observations, duplicate IDs, unknown case references, incomplete case-by-verifier matrices, content-version mismatches, broken parent lineage, and mutation-profile violations. This makes the metrics replayable against frozen artifacts instead of silently scoring a different bundle revision.
 
 ## Reward-Hacking Threat Model
 
@@ -705,14 +723,14 @@ Assessment generation is useful for verifier research because outputs can appear
 | Difficulty gaming | trivial or impossible questions satisfy nominal metadata | solver-based calibration and whole-exam difficulty checks |
 | Recovery exploitation | retries mutate unrelated accepted content or replay expensive calls | immutable versions, target resolution, checkpoint and replacement history |
 
-The infrastructure already records the evidence needed to measure attack success, verifier recall, false positives, disagreement, and repair cost. It does **not** yet include a published adversarial benchmark or a measured reduction in reward-hacking attack success rate.
+The repository now includes the benchmark contracts, six controlled attack generators, offline metrics, and a synthetic reproducibility fixture. It does **not** yet include an expert-validated adversarial corpus, real-model benchmark results, or a measured reduction in reward-hacking attack success rate.
 
 ## RLVR and Reward-Hacking Evaluation Roadmap
 
 The highest-value next experiment is a controlled verifier and adversarial-evaluation pilot:
 
 1. Freeze course evidence, model versions, schemas, prompts, budgets, and random seeds.
-2. Build clean and adversarial response pairs covering format-valid/semantically-wrong answers, lucky answers with invalid reasoning, shared false premises, and rubric loopholes.
+2. Scale the implemented controlled attacks over an expert-validated clean corpus and audit each Oracle label.
 3. Compare deterministic checks, individual Verifiers, verifier ensembles, and Arbiter-gated decisions.
 4. Report attack success rate, verifier recall/precision, disagreement rate, false-rejection rate, repair success, and cost per accepted valid question.
 5. Replay the same trajectories under alternative reward aggregation rules without repeating model generation.

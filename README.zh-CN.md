@@ -646,38 +646,54 @@ docs/                          架构与实现说明
 
 - `BenchmarkCase` 保存不可变 Bundle、Oracle verdict、错误目标、错误代码、证据引用以及 clean/attack lineage。
 - `VerifierObservation` 将一份 `ReviewReport` 绑定到它实际评测的精确 Question、Solution 和 Rubric 版本 ID。
-- `rubric_loophole` 是第一个已实现的受控变异。它保留干净的 Question 和 Solution，只对 Rubric 产生新版本，并插入一条结构合法、但仅匹配关键词就给满分的规则。
-- 其余攻击类别目前是类型化 Benchmark contract 和研究目标，尚未实现对应生成器。
+- 六类受控变异已经全部实现：格式合法但语义错误、答案碰巧正确但推理无效、共享错误前提、Rubric 漏洞、题目条件不足以及难度/覆盖投机。
+- 变异版本 ID 基于 parent version 与 mutation contract 使用 UUIDv5，因此相同 clean input 的重复生成可以达到字节级复现。
+- 数据集校验覆盖闭合 parent lineage、连续 candidate index、logical ID、预期组件变异范围和 parent-version transition。
 
-生成配对的 clean/attack 数据集：
+```mermaid
+flowchart LR
+    C["Clean Bundle + 独立 Oracle"] --> G["六类受控变异生成器"]
+    G --> D["配对 Benchmark 数据集"]
+    D --> V["Verifier 实验组"]
+    V --> O["版本绑定 Observation + Reward Candidate"]
+    D --> R["实验报告"]
+    O --> R
+    R --> M["P/R/F1 + 分攻击 ASR + Disagreement AUROC + ASR@N"]
+```
+
+为每个 clean case 生成全部六类攻击，然后校验数据集：
 
 ```bash
-uv run assessment-workbench benchmark attack-rubric \
+uv run assessment-workbench benchmark attack \
   --cases benchmark/clean.jsonl \
-  --output benchmark/rubric-loophole.jsonl
+  --output benchmark/cases.jsonl
+
+uv run assessment-workbench benchmark validate \
+  --cases benchmark/cases.jsonl
 ```
 
-使用离线 Observation 评估单个 Verifier：
+使用离线 Observation 生成版本化实验报告：
 
 ```bash
-uv run assessment-workbench benchmark evaluate \
-  --cases benchmark/rubric-loophole.jsonl \
-  --observations benchmark/observations.jsonl \
-  --verifier specialized_ensemble \
-  --output benchmark/specialized-ensemble.json
-```
-
-测量 ensemble disagreement 能否区分 Oracle-invalid attack 与 clean case：
-
-```bash
-uv run assessment-workbench benchmark disagreement \
-  --cases benchmark/rubric-loophole.jsonl \
+uv run assessment-workbench benchmark report \
+  --cases benchmark/cases.jsonl \
   --observations benchmark/observations.jsonl \
   --verifier solvability \
   --verifier rubric_consistency \
   --verifier structure \
-  --output benchmark/disagreement.json
+  --output benchmark/report.json
 ```
+
+报告统一包含各 Verifier 指标、按攻击类别拆分的逃逸率、disagreement AUROC、reward-candidate 覆盖率和 best-of-N pressure curve。`evaluate`、`disagreement` 与 `pressure` 命令仍可用于单项分析。
+
+仓库内的 [synthetic fixture](examples/verifier-benchmark/README.md) 无需调用 LLM 即可验证完整数据流：
+
+```bash
+uv run assessment-workbench benchmark validate \
+  --cases examples/verifier-benchmark/cases.jsonl
+```
+
+其中 `surface_checker` 与 `specialized_ensemble` 的结果来自确定性规则表，并明确记录为 `model="synthetic-fixture"`。这些数据只验证重放与报告链路，不是关于真实 Verifier 效果的实验证据。
 
 | 指标 | 定义 |
 | --- | --- |
@@ -686,8 +702,10 @@ uv run assessment-workbench benchmark disagreement \
 | Clean Acceptance Rate | 被 Verifier 接受的 Oracle-valid case / 全部 clean case |
 | Case Disagreement | `2 * min(accept_votes, reject_votes) / verifier_count` |
 | Disagreement AUROC | 以 disagreement 预测 Oracle-invalid case 的成对 AUROC；分数相同时计 0.5 |
+| Attack Success Rate at N | 前 N 个 Oracle-invalid attack 中 reward 最高的 candidate 被接受的比例 |
+| 按攻击类别的逃逸率 | 每类受控攻击中被接受的 Oracle-invalid case 比例 |
 
-读取器会拒绝 Observation 缺失、ID 重复、未知 case 引用、不完整的 case × verifier 矩阵以及内容版本不匹配。这样，指标可以针对冻结 Artifact 重放，而不会静默评测另一个 Bundle 修订版本。
+读取器会拒绝 Observation 缺失、ID 重复、未知 case 引用、不完整的 case × verifier 矩阵、内容版本不匹配、断裂的 parent lineage 和 mutation-profile 违规。这样，指标可以针对冻结 Artifact 重放，而不会静默评测另一个 Bundle 修订版本。
 
 ## Reward-Hacking 威胁模型
 
@@ -705,14 +723,14 @@ uv run assessment-workbench benchmark disagreement \
 | 难度投机 | 过易或不可解题目满足名义 metadata | 基于 Solver 的难度校准与整卷难度检查 |
 | 恢复机制投机 | 重试时修改无关已接受内容，或重复昂贵调用 | 不可变版本、目标解析、checkpoint 与 replacement history |
 
-当前基础设施已经记录计算 Attack Success、Verifier Recall、False Positive、Disagreement 和 Repair Cost 所需的证据，但尚未发布对抗 Benchmark，也没有测得 Reward-Hacking Attack Success Rate 的下降幅度。
+仓库现在已经包含 Benchmark contract、六类受控攻击生成器、离线指标和 synthetic reproducibility fixture。但目前仍没有专家校验的对抗语料、真实模型 Benchmark 结果，也没有测得 Reward-Hacking Attack Success Rate 的下降幅度。
 
 ## RLVR 与 Reward-Hacking 评测路线图
 
 下一项最有价值的实验是受控 Verifier 与对抗评测 pilot：
 
 1. 冻结课程证据、模型版本、Schema、Prompt、预算和随机种子。
-2. 构造干净/对抗响应对，覆盖“格式正确但语义错误”“答案碰巧正确但推理错误”“共享错误前提”和“Rubric 漏洞”。
+2. 将已实现的受控攻击扩展到专家校验的 clean corpus，并审计每个 Oracle 标签。
 3. 对比确定性检查、单个 Verifier、Verifier ensemble 和 Arbiter 门禁决策。
 4. 报告 Attack Success Rate、Verifier Recall/Precision、Disagreement Rate、False-Rejection Rate、Repair Success 和 Cost per Accepted Valid Question。
 5. 不重新调用生成模型，在相同轨迹上重放不同 Reward 聚合规则。
