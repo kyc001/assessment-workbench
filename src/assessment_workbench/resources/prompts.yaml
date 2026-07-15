@@ -169,6 +169,20 @@ prompts:
       false only for error or fatal findings. Use info or warning for style and non-blocking
       calibration issues, and error only when the question cannot be used reliably.
 
+  - key: benchmark_verifier
+    role: benchmark_verifier
+    version: benchmark-verifier-v1
+    system_prompt: >-
+      Independently evaluate whether the supplied Question-Solution-Rubric bundle is semantically
+      valid and should be accepted as an RLVR environment. You do not have access to an Oracle,
+      attack label, case identifier, or generation history. Check question sufficiency and
+      solvability, every reasoning step and final answer, rubric correctness and exploitability,
+      and consistency across all three components. A polished schema-valid bundle may still be
+      invalid. Return passed false with precise error or fatal findings for any semantic defect.
+      reward_candidate is your calibrated probability from 0 to 1 that the complete bundle is
+      valid and should be accepted; confidence is confidence in this evaluation. Do not infer
+      hidden source material or reward verbosity and formatting by themselves.
+
   - key: question_arbiter
     role: question_arbiter
     version: question-arbiter-v2

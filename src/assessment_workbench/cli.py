@@ -14,9 +14,11 @@ from assessment_workbench.application import (
     open_workspace,
     publish_question_bundle,
 )
+from assessment_workbench.benchmark_runner import run_llm_verifier
 from assessment_workbench.benchmarking import (
     AttackKind,
     DeterministicBaseline,
+    VerifierObservation,
     build_attack_dataset,
     calculate_benchmark_experiment_report,
     calculate_optimization_pressure,
@@ -62,6 +64,7 @@ from assessment_workbench.parsers import FixtureParser, MinerUApiParser, MinerUC
 from assessment_workbench.planning import QuestionSpecWorkflow
 from assessment_workbench.ports import DocumentParser
 from assessment_workbench.profiles import load_exam_blueprint, load_subject_profile
+from assessment_workbench.prompting import load_default_prompt_registry
 from assessment_workbench.storage import (
     ArtifactStore,
     LocalKnowledgeBackend,
@@ -211,6 +214,106 @@ def generate_baseline_observations(
     except (OSError, ValueError) as exc:
         typer.echo(_console_safe(exc, err=True), err=True)
         raise typer.Exit(1) from exc
+    typer.echo(output)
+
+
+@benchmark_app.command("observe-llm")
+def generate_llm_verifier_observations(
+    cases_path: Annotated[
+        Path,
+        typer.Option("--cases", exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Resume-safe verifier observation JSONL path"),
+    ],
+    verifier: Annotated[str, typer.Option(help="Stable verifier arm identifier")],
+    model_name: Annotated[
+        str | None,
+        typer.Option("--model", help="Model override; defaults to AW_LLM_MODEL"),
+    ] = None,
+    trial: Annotated[int, typer.Option(min=1)] = 1,
+    concurrency: Annotated[
+        int | None,
+        typer.Option(min=1, help="Concurrent case evaluations"),
+    ] = None,
+    workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
+) -> None:
+    settings = Settings()
+    resolved_model = model_name or settings.llm_model
+    resolved_concurrency = concurrency or settings.llm_request_concurrency
+    try:
+        cases = read_benchmark_cases(cases_path)
+        case_by_id = {case.case_id: case for case in cases}
+        observations = read_verifier_observations(output) if output.exists() else []
+        completed_case_ids: set[str] = set()
+        for observation in observations:
+            case = case_by_id.get(observation.case_id)
+            if case is None:
+                raise ValueError(
+                    f"existing observation references unknown case: {observation.case_id}"
+                )
+            actual = (
+                observation.question_version_id,
+                observation.solution_version_id,
+                observation.rubric_version_id,
+            )
+            expected = (
+                case.bundle.question.id,
+                case.bundle.solution.id,
+                case.bundle.rubric.id,
+            )
+            if actual != expected:
+                raise ValueError(
+                    f"existing observation version mismatch for case: {observation.case_id}"
+                )
+            if observation.report.reviewer == verifier and observation.trial == trial:
+                completed_case_ids.add(observation.case_id)
+
+        workspace = _workspace(workspace_path)
+        model = OpenAICompatibleModel(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=resolved_model,
+            audit_store=LocalKnowledgeBackend(workspace),
+            timeout=settings.http_timeout,
+            max_concurrency=resolved_concurrency,
+            schema_in_prompt=settings.llm_schema_in_prompt,
+        )
+        prompt = load_default_prompt_registry().require("benchmark_verifier")
+        case_order = {case.case_id: index for index, case in enumerate(cases)}
+
+        def persist(observation: VerifierObservation) -> None:
+            observations.append(observation)
+            observations.sort(
+                key=lambda item: (
+                    item.report.reviewer,
+                    item.trial,
+                    case_order[item.case_id],
+                )
+            )
+            write_verifier_observations(output, observations)
+
+        result = asyncio.run(
+            run_llm_verifier(
+                cases,
+                model,
+                prompt=prompt,
+                verifier=verifier,
+                model_name=resolved_model,
+                trial=trial,
+                concurrency=resolved_concurrency,
+                completed_case_ids=completed_case_ids,
+                on_observation=persist,
+            )
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        typer.echo(_console_safe(exc, err=True), err=True)
+        raise typer.Exit(1) from exc
+    if result.failures:
+        for case_id, error in sorted(result.failures.items()):
+            typer.echo(_console_safe(f"{case_id}: {error}", err=True), err=True)
+        raise typer.Exit(1)
     typer.echo(output)
 
 
