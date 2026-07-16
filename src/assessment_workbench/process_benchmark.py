@@ -210,6 +210,7 @@ async def run_process_verifier(
     trial: int = 1,
     concurrency: int = 4,
     max_new_cases: int | None = None,
+    request_delay_seconds: float = 0,
     completed_case_ids: Iterable[str] = (),
     on_observation: Callable[[ProcessVerifierObservation], None] | None = None,
 ) -> ProcessVerifierRunResult:
@@ -225,6 +226,8 @@ async def run_process_verifier(
         raise ValueError("process verifier concurrency must be at least 1")
     if max_new_cases is not None and max_new_cases < 1:
         raise ValueError("max_new_cases must be at least 1")
+    if request_delay_seconds < 0:
+        raise ValueError("request_delay_seconds cannot be negative")
     completed = set(completed_case_ids)
     known_case_ids = {case.case_id for case in materialized_cases}
     unknown_completed = sorted(completed - known_case_ids)
@@ -238,29 +241,33 @@ async def run_process_verifier(
     ) -> tuple[str, ProcessVerifierObservation | None, str | None]:
         try:
             async with semaphore:
-                judgment = await model.complete(
-                    role=prompt.role,
-                    system_prompt=prompt.system_prompt,
-                    user_prompt=json.dumps(
-                        {
-                            "problem": case.problem,
-                            "steps": [
-                                {"index": index, "content": step}
-                                for index, step in enumerate(case.steps)
-                            ],
-                            "output_contract": {
-                                "first_error_step": (
-                                    "Zero-based index of the earliest incorrect step, or -1 if "
-                                    "every step is correct."
-                                )
+                try:
+                    judgment = await model.complete(
+                        role=prompt.role,
+                        system_prompt=prompt.system_prompt,
+                        user_prompt=json.dumps(
+                            {
+                                "problem": case.problem,
+                                "steps": [
+                                    {"index": index, "content": step}
+                                    for index, step in enumerate(case.steps)
+                                ],
+                                "output_contract": {
+                                    "first_error_step": (
+                                        "Zero-based index of the earliest incorrect step, or -1 "
+                                        "if every step is correct."
+                                    )
+                                },
                             },
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    response_model=ProcessVerifierJudgment,
-                    prompt_version=prompt.version,
-                )
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        response_model=ProcessVerifierJudgment,
+                        prompt_version=prompt.version,
+                    )
+                finally:
+                    if request_delay_seconds:
+                        await asyncio.sleep(request_delay_seconds)
             if judgment.first_error_step >= len(case.steps):
                 raise ValueError(
                     "predicted first error step is outside the supplied solution: "

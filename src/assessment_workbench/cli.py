@@ -391,6 +391,14 @@ def generate_process_verifier_observations(
             help="Evaluate at most this many incomplete cases in this invocation",
         ),
     ] = None,
+    request_delay_seconds: Annotated[
+        float,
+        typer.Option(
+            "--request-delay",
+            min=0,
+            help="Delay after each model request to respect upstream rate limits",
+        ),
+    ] = 0,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     settings = Settings()
@@ -443,6 +451,7 @@ def generate_process_verifier_observations(
                 trial=trial,
                 concurrency=resolved_concurrency,
                 max_new_cases=max_new_cases,
+                request_delay_seconds=request_delay_seconds,
                 completed_case_ids=completed_case_ids,
                 on_observation=persist,
             )

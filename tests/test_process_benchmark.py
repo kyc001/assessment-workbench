@@ -164,6 +164,28 @@ async def test_process_verifier_runner_limits_new_cases_for_batched_resume(
     assert len(model.prompts) == 2
 
 
+async def test_process_verifier_runner_applies_request_delay(tmp_path: Path) -> None:
+    cases = import_processbench_cases(
+        _write_source(tmp_path / "source.json"),
+        split="gsm8k",
+        limit=1,
+    )
+    model = _FixtureProcessVerifier()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    await run_process_verifier(
+        cases,
+        model,  # type: ignore[arg-type]
+        prompt=load_default_prompt_registry().require("process_verifier"),
+        verifier="fixture_process",
+        model_name="fixture-model",
+        request_delay_seconds=0.02,
+    )
+
+    assert loop.time() - started >= 0.02
+
+
 def test_process_report_scores_localization_and_final_answer_traps() -> None:
     cases = [
         ProcessBenchmarkCase(
