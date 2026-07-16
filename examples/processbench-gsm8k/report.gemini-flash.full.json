@@ -1,0 +1,19 @@
+{
+  "schema_version": "process-benchmark-report-v1",
+  "dataset": {
+    "total_cases": 400,
+    "correct_processes": 193,
+    "erroneous_processes": 207,
+    "final_answer_traps": 7
+  },
+  "metrics": {
+    "verifier": "gemini_flash",
+    "trial": 1,
+    "exact_localization_accuracy": 0.91,
+    "error_detection_recall": 0.9806763285024155,
+    "correct_process_acceptance_rate": 0.9844559585492227,
+    "error_localization_accuracy": 0.8405797101449275,
+    "final_answer_trap_localization_accuracy": 0.42857142857142855,
+    "mean_absolute_step_error_on_detected": 0.2561576354679803
+  }
+}

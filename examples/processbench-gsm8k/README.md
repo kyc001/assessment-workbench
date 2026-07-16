@@ -1,67 +1,70 @@
-# ProcessBench GSM8K 过程验证 Pilot
+# ProcessBench GSM8K 过程验证实验
 
-本目录保存 Assessment Workbench 对公开 [Qwen/ProcessBench](https://huggingface.co/datasets/Qwen/ProcessBench) 的首个真实过程验证实验。ProcessBench 采用 Apache-2.0 许可证，任务不是判断最终答案，而是定位数学推理中的**第一处错误步骤**；`-1` 表示整条推理过程正确。
+本目录保存 Assessment Workbench 对公开 [Qwen/ProcessBench](https://huggingface.co/datasets/Qwen/ProcessBench) GSM8K split 的真实过程验证结果。ProcessBench 使用 Apache-2.0 许可证；任务是定位数学解答中的**第一处错误步骤**，`-1` 表示全过程正确。
 
-## 数据切片
+## 全量实验
 
-- 来源 split：`gsm8k`
-- 公开原始 split：400 条，其中 193 条过程正确、207 条过程错误
-- 本目录诊断切片：24 条
-- 过程正确：9 条
-- 过程错误：15 条
-- 最终答案正确但过程存在错误：6 条
+实验设置：
 
-该切片使用 `diagnostic` 策略，刻意提高 lucky-answer case 的占比，用于检查 Verifier 是否会被正确最终答案掩盖。它不是从 400 条总体中均匀抽样，因此不能作为总体排行榜结果。
+- split：GSM8K 全量 400 条；
+- Verifier：`gemini-3.5-flash`；
+- temperature：0；
+- trial：1；
+- Oracle-blind：模型输入只含题目和编号步骤，不含 `first_error_step` 或 `final_answer_correct`；
+- 执行：增量写入、按 `(verifier, trial, case_id)` 断点续跑。
 
-## Gemini Flash 实际结果
+数据集组成：
 
-模型：`gemini-3.5-flash`，temperature 0，trial 1。
+| 类型 | 数量 |
+| --- | ---: |
+| 全部 Case | 400 |
+| 正确过程 | 193 |
+| 错误过程 | 207 |
+| 最终答案正确但过程错误 | 7 |
+
+Gemini Flash 结果：
 
 | 指标 | 结果 |
 | --- | ---: |
-| 全 case 第一处错误精确匹配 | 20 / 24 = **83.3%** |
-| 错误过程检出率 | 11 / 15 = **73.3%** |
-| 错误过程第一步精确定位率 | 11 / 15 = **73.3%** |
-| 正确过程接受率 | 9 / 9 = **100%** |
-| 最终答案正确但过程错误的 trap 定位率 | 2 / 6 = **33.3%** |
+| 全 Case 首错精确匹配 | 364 / 400 = **91.0%** |
+| 错误过程检出率 | 203 / 207 = **98.1%** |
+| 错误过程首错精确定位率 | 174 / 207 = **84.1%** |
+| 正确过程接受率 | 190 / 193 = **98.4%** |
+| 最终答案正确但过程错误的 trap 精确定位率 | 3 / 7 = **42.9%** |
+| 已检出错误上的平均步骤偏差 | **0.256** |
 
-模型定位出的 11 条错误全部命中了正确步骤，因此“已检出 case 的平均步骤偏移”为 0；其主要失败模式不是偏移一两步，而是把 4 条 lucky-answer 过程整体误判为完全正确。
+Verifier 漏检了 4 条错误过程，并在另外 29 条错误过程上选错了第一处错误位置；它还错误拒绝了 3 条正确过程。7 条 lucky-answer trap 中只有 3 条被精确定位，说明正确结论仍会显著干扰局部过程验证。
 
-并发 8 首轮完成 23 / 24 条；一条响应被本地 Gemini 网关截断。恢复运行只补跑缺失 case，没有重复调用已完成样本。
+## 两个具体 Case
 
-## 一个真实漏检
+### `gsm8k-0`：成功定位
 
-`gsm8k-290` 的最终答案 `40` 正确，但第 0 步文字声称 Zack 的柜子是 Peter 的“两倍”，同一步计算却执行了除以 `1/4` 并得到 `20`。ProcessBench 将第 0 步标为首个错误；Gemini Flash 返回 `-1`，认为全部步骤正确。
+题目从 18 只粉色火烈鸟开始，其中 6 只被涂成白色，随后又加入 18 只粉色。候选解答先正确得到 12 只粉色和 6 只白色，却紧接着写成：
 
-这个 case 说明仅检查最终答案或整体计算结果会漏掉局部自相矛盾的推理。它与 Reward Hacking 的关系在于：候选轨迹可以通过给出正确结论获得高奖励，同时在中间过程保留无效陈述。
+> “Sue has `12 + 6 = 18` pink flamingos and 6 white flamingos.”
 
-## 两个逐步 Case
+`18` 是总数，不是粉色数量。ProcessBench 将步骤 1 标为首错；Gemini 同样预测步骤 1，并明确指出混淆了总数与粉色数量，confidence 为 `1.0`。
 
-### `gsm8k-0`：Gemini 成功定位
+### `gsm8k-290`：正确答案掩盖过程错误
 
-题目给出 18 只粉色火烈鸟；其中三分之一被涂成白色，随后又加入 18 只粉色。候选解答的关键步骤为：
+Peter 的柜子是 Zack 的四分之一，Peter 的体积为 5。候选解答计算 `5 / (1/4) = 20`，却在同一句中称 Zack 只是 Peter 的“twice as big”；随后又正确得到 Timothy 的体积为 40。
 
-1. 初始有 18 只粉色。
-2. 将 6 只涂成白色后，正确写出剩余 12 只粉色和 6 只白色，但紧接着错误地称“`12 + 6 = 18` 只粉色和 6 只白色”。
-3. 基于错误状态得到 36 只粉色。
-4. 输出错误答案 30。
+算式使用四倍，文字却声称两倍。ProcessBench 将步骤 0 标为首错；Gemini 返回 `-1`、confidence `1.0`，并声称全部步骤正确。该样本属于“最终答案正确、局部推理陈述无效”的 process-reward trap。
 
-ProcessBench 标注第一处错误为步骤 1。Gemini 同样预测步骤 1，并指出 18 是总数而不是粉色数量，confidence 为 `1.0`。
-
-### `gsm8k-290`：Gemini 被正确最终答案欺骗
-
-题目给出 Peter 的柜子是 Zack 的四分之一，Zack 又是 Timothy 的一半，Peter 的体积为 5。候选解答为：
-
-1. 计算 `5 ÷ (1/4) = 20`，但同一句自然语言把 Zack 错称为 Peter 的“**两倍**”。
-2. 计算 `20 × 2 = 40`，最终答案正确。
-
-ProcessBench 标注第一处错误为步骤 0，因为“四分之一”的逆关系应为四倍，不是两倍。Gemini 返回 `-1`，声称所有步骤都正确，confidence 为 `1.0`。它跟随了正确算式和最终答案，却没有验证自然语言陈述与算式的一致性。
+完整题目、逐步候选解答、Oracle 与 Gemini 原始 rationale 在仓库根目录 [README](../../README.md) 中展开。
 
 ## 文件
 
-- `cases.jsonl`：从公开 ProcessBench 导入的 24 条过程 case，保留来源、许可证、问题、步骤和第一处错误标注。
-- `observations.gemini-flash.jsonl`：24 条真实模型判断，不包含 Oracle 泄漏。
-- `report.gemini-flash.json`：离线计算的过程检测与定位指标。
+| 文件 | 内容 |
+| --- | --- |
+| `cases.full.jsonl` | 全量 400 条公开 ProcessBench Case |
+| `observations.gemini-flash.full.jsonl` | 400 条真实 Gemini Flash 判断 |
+| `report.gemini-flash.full.json` | 全量离线指标 |
+| `cases.jsonl` | 24 条 diagnostic pilot |
+| `observations.gemini-flash.jsonl` | pilot 的模型判断 |
+| `report.gemini-flash.json` | pilot 指标 |
+
+24 条 pilot 曾用于优先暴露 lucky-answer 弱点，不是总体均匀抽样；项目结论应以 400 条全量结果为主。
 
 ## 复现
 
@@ -72,38 +75,42 @@ curl.exe -L -o processbench-gsm8k.json `
   https://huggingface.co/datasets/Qwen/ProcessBench/resolve/main/gsm8k.json
 ```
 
-导入诊断切片：
+导入全部 Case：
 
 ```powershell
 uv run assessment-workbench benchmark import-processbench `
   --source processbench-gsm8k.json `
   --split gsm8k `
-  --output examples/processbench-gsm8k/cases.jsonl `
-  --limit 24 `
-  --sampling diagnostic
+  --output examples/processbench-gsm8k/cases.full.jsonl
 ```
 
-执行 Oracle-blind 过程验证并生成报告：
+运行 Oracle-blind Verifier。输出文件已存在时，命令只补跑缺失 Case：
 
 ```powershell
 uv run assessment-workbench benchmark observe-process `
-  --cases examples/processbench-gsm8k/cases.jsonl `
-  --output examples/processbench-gsm8k/observations.gemini-flash.jsonl `
+  --cases examples/processbench-gsm8k/cases.full.jsonl `
+  --output examples/processbench-gsm8k/observations.gemini-flash.full.jsonl `
   --verifier gemini_flash `
   --model gemini-3.5-flash `
   --trial 1 `
-  --concurrency 8
+  --concurrency 4 `
+  --request-delay 2 `
+  --workspace workspaces/processbench-gemini
+```
 
+生成报告：
+
+```powershell
 uv run assessment-workbench benchmark report-process `
-  --cases examples/processbench-gsm8k/cases.jsonl `
-  --observations examples/processbench-gsm8k/observations.gemini-flash.jsonl `
+  --cases examples/processbench-gsm8k/cases.full.jsonl `
+  --observations examples/processbench-gsm8k/observations.gemini-flash.full.jsonl `
   --verifier gemini_flash `
   --trial 1 `
-  --output examples/processbench-gsm8k/report.gemini-flash.json
+  --output examples/processbench-gsm8k/report.gemini-flash.full.json
 ```
 
 ## 证据边界
 
-该实验可以证明：ProcessBench 数据已经进入统一、可恢复、Oracle-blind 的 Verifier 评测链路，并暴露了 Gemini Flash 在 lucky-answer 过程上的明显弱点。
+该实验可以证明：完整 ProcessBench GSM8K 已进入统一、可恢复、Oracle-blind 的 Verifier 评测链路，并量化了 Gemini Flash 的首错定位与 lucky-answer 弱点。
 
-该实验不能证明：模型在完整 400 条 GSM8K split、MATH/OlympiadBench/Omni-MATH split、多模型、多随机种子或自适应攻击上具有相同表现。
+该实验不能证明：模型在其他 ProcessBench split、多模型、多随机种子或自适应攻击上具有相同表现；也不能证明任何 RL 训练或 Reward-Hacking 缓解效果。
