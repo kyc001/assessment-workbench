@@ -255,6 +255,14 @@ def generate_llm_verifier_observations(
         int | None,
         typer.Option(min=1, help="Concurrent case evaluations"),
     ] = None,
+    max_new_cases: Annotated[
+        int | None,
+        typer.Option(
+            "--max-new-cases",
+            min=1,
+            help="Evaluate at most this many incomplete cases in this invocation",
+        ),
+    ] = None,
     workspace_path: Annotated[Path | None, typer.Option("--workspace")] = None,
 ) -> None:
     settings = Settings()
@@ -321,6 +329,7 @@ def generate_llm_verifier_observations(
                 model_name=resolved_model,
                 trial=trial,
                 concurrency=resolved_concurrency,
+                max_new_cases=max_new_cases,
                 completed_case_ids=completed_case_ids,
                 on_observation=persist,
             )

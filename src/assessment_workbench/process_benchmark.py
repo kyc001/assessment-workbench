@@ -209,6 +209,7 @@ async def run_process_verifier(
     model_name: str,
     trial: int = 1,
     concurrency: int = 4,
+    max_new_cases: int | None = None,
     completed_case_ids: Iterable[str] = (),
     on_observation: Callable[[ProcessVerifierObservation], None] | None = None,
 ) -> ProcessVerifierRunResult:
@@ -222,6 +223,8 @@ async def run_process_verifier(
         raise ValueError("process verifier trial must be at least 1")
     if concurrency < 1:
         raise ValueError("process verifier concurrency must be at least 1")
+    if max_new_cases is not None and max_new_cases < 1:
+        raise ValueError("max_new_cases must be at least 1")
     completed = set(completed_case_ids)
     known_case_ids = {case.case_id for case in materialized_cases}
     unknown_completed = sorted(completed - known_case_ids)
@@ -280,6 +283,8 @@ async def run_process_verifier(
             return case.case_id, None, str(exc)
 
     pending = [case for case in materialized_cases if case.case_id not in completed]
+    if max_new_cases is not None:
+        pending = pending[:max_new_cases]
     tasks = [asyncio.create_task(evaluate(case)) for case in pending]
     observations: list[ProcessVerifierObservation] = []
     failures: dict[str, str] = {}

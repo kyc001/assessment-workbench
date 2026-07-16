@@ -138,6 +138,32 @@ async def test_process_verifier_runner_is_oracle_blind_and_bounded(tmp_path: Pat
     assert all("label" not in prompt for prompt in model.prompts)
 
 
+async def test_process_verifier_runner_limits_new_cases_for_batched_resume(
+    tmp_path: Path,
+) -> None:
+    cases = import_processbench_cases(
+        _write_source(tmp_path / "source.json"),
+        split="gsm8k",
+    )
+    model = _FixtureProcessVerifier()
+
+    result = await run_process_verifier(
+        cases,
+        model,  # type: ignore[arg-type]
+        prompt=load_default_prompt_registry().require("process_verifier"),
+        verifier="fixture_process",
+        model_name="fixture-model",
+        max_new_cases=2,
+        completed_case_ids=[cases[0].case_id],
+    )
+
+    assert [observation.case_id for observation in result.observations] == [
+        cases[1].case_id,
+        cases[2].case_id,
+    ]
+    assert len(model.prompts) == 2
+
+
 def test_process_report_scores_localization_and_final_answer_traps() -> None:
     cases = [
         ProcessBenchmarkCase(
